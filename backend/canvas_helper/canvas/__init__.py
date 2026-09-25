@@ -1,0 +1,1 @@
+"""Safe Canvas API client."""

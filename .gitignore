@@ -1,0 +1,44 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.db
+*.db-shm
+*.db-wal
+.canvas-helper/
+# Secrets and local configuration
+*.env
+!.env.example
+.secrets/
+canvas api.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+src-tauri/target/
+src-tauri/binaries/
+build/
+dist/
+*.spec
+
+# Runtime data
+/data/
+/materials/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Editors and macOS
+.DS_Store
+.idea/
+.vscode/
+*.tsbuildinfo

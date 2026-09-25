@@ -1,0 +1,158 @@
+# Canvas 助手
+
+本地优先的 Canvas 学习助手。同步本学期课程、作业截止时间、公告和课程资料，支持搜索、文件预览、笔记和引用式 AI。
+
+可以自己本机用，也可以部署成网站：别人注册后填入自己的 Canvas API Token 即可使用。
+
+## 功能
+
+- 本学期课程、作业、日历待办和教师/Tutor 公告
+- 资料库：页面、作业说明、Word / PDF / Excel 预览与全文检索
+- 自动同步：公告、作业、日历约 5 分钟；资料约 15 分钟
+- Markdown 笔记，可关联课程、作业或资料
+- 引用式 AI（用户自备 Anthropic / OpenAI Key）
+- 两种运行方式：本机桌面 / 多用户自托管
+
+## 本机使用
+
+需要 Python 3.12+、Node.js 20+。
+
+```bash
+make install
+```
+
+开两个终端：
+
+```bash
+make backend
+make frontend
+```
+
+打开 <http://127.0.0.1:5173>，在设置向导中填入 Canvas 地址和访问令牌。
+
+令牌保存在本机钥匙串，不会回显，也不会写入仓库。
+
+```bash
+make test
+```
+
+## 上线给别人用
+
+线上模式是多用户网站：邮箱魔法链接登录，每人自己绑定 Canvas Token 和可选的 AI Key。
+
+生产环境必须同时满足：
+
+- HTTPS 域名
+- PostgreSQL
+- SMTP（用来发登录邮件）
+- 32 字节加密密钥（用来加密用户的 Canvas / AI 凭证）
+
+缺任何一项服务都不会启动。
+
+### 1. 准备一台服务器
+
+推荐 1 核 2GB 以上的 Linux VPS，安装 Docker 和 Docker Compose。域名解析到这台机器，例如 `https://canvas.yourdomain.com`。
+
+### 2. 克隆并配置
+
+```bash
+git clone git@github.com:Jalensuggs/canvas-helper.git
+cd canvas-helper
+cp .env.example .env
+```
+
+编辑 `.env`，至少填这些：
+
+```bash
+POSTGRES_PASSWORD=换成很长的随机密码
+CANVAS_HELPER_PUBLIC_URL=https://canvas.yourdomain.com
+CANVAS_HELPER_CREDENTIAL_ENCRYPTION_KEY=见下一步生成
+CANVAS_HELPER_EMAIL_FROM=Canvas Helper <noreply@yourdomain.com>
+CANVAS_HELPER_SMTP_HOST=smtp.yourdomain.com
+CANVAS_HELPER_SMTP_PORT=587
+CANVAS_HELPER_SMTP_USERNAME=你的发信账号
+CANVAS_HELPER_SMTP_PASSWORD=你的发信密码
+```
+
+生成加密密钥：
+
+```bash
+python3 -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+```
+
+SMTP 可以用学校邮箱、Resend、Amazon SES，或 Gmail 应用专用密码。没有能发出去的登录邮件，别人就登不进去。
+
+### 3. 启动应用
+
+```bash
+docker compose --env-file .env up -d --build
+docker compose ps
+```
+
+容器默认只把 API 绑在本机 `127.0.0.1:8000`，不要把 8000、5432 直接暴露到公网。
+
+### 4. 前面加 HTTPS
+
+把 `docker/Caddyfile.example` 里的域名改成你的，然后用 Caddy 或 Nginx 反代到 `127.0.0.1:8000`。
+
+Caddy 示例：
+
+```bash
+sudo cp docker/Caddyfile.example /etc/caddy/Caddyfile
+# 改域名后
+sudo systemctl reload caddy
+```
+
+证书由 Caddy 自动申请。确认 `CANVAS_HELPER_PUBLIC_URL` 和浏览器访问的 HTTPS 地址完全一致。
+
+### 5. 别人怎么用
+
+1. 打开你的网站，输入邮箱
+2. 查收魔法链接并登录
+3. 在设置里填 Canvas 地址和 API Token
+4. 等待第一次同步，之后会自动更新公告、作业和资料
+
+Canvas Token 只存在服务器加密存储里，不会出现在页面或日志中。
+
+### 6. 更新
+
+```bash
+git pull
+docker compose --env-file .env up -d --build
+```
+
+数据库迁移会在 API 容器启动时自动执行。备份见 [docs/backup-upgrade.md](docs/backup-upgrade.md)。
+
+## 环境变量
+
+只读取 `CANVAS_HELPER_` 开头的环境变量，不会自动加载 `.env` 文件。Docker Compose 会把 `.env` 注入容器。
+
+| 变量 | 说明 |
+| --- | --- |
+| `CANVAS_HELPER_DEPLOYMENT_MODE` | `local_desktop` 或 `server` |
+| `CANVAS_HELPER_DATABASE_URL` | 本机 SQLite，或线上 `postgresql+asyncpg://...` |
+| `CANVAS_HELPER_PUBLIC_URL` | 线上 HTTPS 根地址 |
+| `CANVAS_HELPER_CREDENTIAL_ENCRYPTION_KEY` | 线上必填，丢失后旧凭证无法解密 |
+| `CANVAS_HELPER_EMAIL_BACKEND` | 开发用 `development`，线上必须 `smtp` |
+
+完整示例见 [.env.example](.env.example)。
+
+## 安全
+
+- 本机模式只监听 `127.0.0.1`，写请求还要可信 Origin
+- 线上模式用 HttpOnly Session + CSRF，凭证 AES-GCM 加密
+- Canvas HTML 会净化；下载路径会检查穿越和符号链接
+- 不要把 PostgreSQL、MinIO 或 8000 端口直接对公网开放
+- `*.env`、数据库、下载资料和密钥目录默认被 Git 忽略
+
+更多见 [PRIVACY.md](PRIVACY.md)、[SECURITY.md](SECURITY.md)、[docs/threat-model.md](docs/threat-model.md)。
+
+## 文档
+
+- [本地开发](docs/local-development.md)
+- [Docker 自托管](docs/docker-self-host.md)
+- [桌面打包](docs/desktop-release.md)
+- [备份与升级](docs/backup-upgrade.md)
+- [贡献](CONTRIBUTING.md)
+
+MIT License。
