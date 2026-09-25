@@ -189,6 +189,7 @@ export async function streamChat(
   message: string,
   context: JsonObject,
   onEvent: (event: ChatEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const headers = new Headers({
     Accept: "text/event-stream",
@@ -202,6 +203,7 @@ export async function streamChat(
     credentials: "same-origin",
     headers,
     body: JSON.stringify({ message, context, stream: true }),
+    signal,
   });
   if (!response.ok || !response.body) {
     const body = await response.json().catch(() => ({})) as JsonObject;
@@ -210,16 +212,23 @@ export async function streamChat(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    const blocks = buffer.split("\n\n");
-    buffer = blocks.pop() ?? "";
-    for (const block of blocks) {
-      const data = block.split("\n").find((line) => line.startsWith("data: "));
-      if (data) onEvent(JSON.parse(data.slice(6)) as ChatEvent);
+  try {
+    while (true) {
+      if (signal?.aborted) break;
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const blocks = buffer.split("\n\n");
+      buffer = blocks.pop() ?? "";
+      for (const block of blocks) {
+        const data = block.split("\n").find((line) => line.startsWith("data: "));
+        if (data) onEvent(JSON.parse(data.slice(6)) as ChatEvent);
+      }
+      if (done) break;
     }
-    if (done) break;
+  } finally {
+    // Leaving the response unread keeps the connection, and the server-side
+    // generator behind it, alive after the caller has gone.
+    await reader.cancel().catch(() => undefined);
   }
 }
 

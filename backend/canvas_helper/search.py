@@ -15,6 +15,12 @@ from .models import DocChunk, Document
 
 _SPACE = re.compile(r"\s+")
 _TOKENS = re.compile(r"[\w\u3400-\u9fff]+", re.UNICODE)
+# CJK ideographs plus the kana ranges that share the "no word breaks" problem.
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def _has_cjk(value: str) -> bool:
+    return bool(_CJK.search(value))
 
 
 class _TextExtractor(HTMLParser):
@@ -241,15 +247,28 @@ class SearchService:
             "c.title, c.content, c.ordinal, c.page, c.slide, c.source_date, c.source_url"
         )
         if dialect == "postgresql":
-            params["query"] = normalized
-            statement = text(
-                f"SELECT {columns}, "
-                "ts_rank_cd(c.search_vector, websearch_to_tsquery('simple', :query)) AS rank "
-                "FROM doc_chunks c WHERE "
-                + " AND ".join(where)
-                + " AND c.search_vector @@ websearch_to_tsquery('simple', :query) "
-                "ORDER BY rank DESC, c.id LIMIT :limit"
-            )
+            if _has_cjk(normalized):
+                # to_tsvector('simple') splits on whitespace, so a Chinese
+                # sentence is one token and no substring of it ever matches.
+                # Trigram matching is what makes those queries work at all;
+                # migration 0008 adds the GIN index that keeps it fast.
+                params["pattern"] = f"%{normalized}%"
+                statement = text(
+                    f"SELECT {columns}, 0.0 AS rank FROM doc_chunks c WHERE "
+                    + " AND ".join(where)
+                    + " AND (c.title ILIKE :pattern OR c.content ILIKE :pattern) "
+                    "ORDER BY c.source_date DESC NULLS LAST, c.id LIMIT :limit"
+                )
+            else:
+                params["query"] = normalized
+                statement = text(
+                    f"SELECT {columns}, "
+                    "ts_rank_cd(c.search_vector, websearch_to_tsquery('simple', :query)) AS rank "
+                    "FROM doc_chunks c WHERE "
+                    + " AND ".join(where)
+                    + " AND c.search_vector @@ websearch_to_tsquery('simple', :query) "
+                    "ORDER BY rank DESC, c.id LIMIT :limit"
+                )
         else:
             fts = _fts_query(normalized)
             # Trigram FTS requires three-character terms. LIKE is a safe fallback

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import smtplib
+import ssl
 from email.message import EmailMessage
 from typing import Protocol
 
@@ -42,9 +43,19 @@ class SMTPEmailBackend:
         await asyncio.to_thread(self._send, message)
 
     def _send(self, message: EmailMessage) -> None:
-        with smtplib.SMTP(self.settings.smtp_host, self.settings.smtp_port) as smtp:
-            if self.settings.smtp_starttls:
-                smtp.starttls()
+        host = self.settings.smtp_host
+        port = self.settings.smtp_port
+        timeout = self.settings.smtp_timeout_seconds
+        # Port 465 is implicit TLS; STARTTLS on it would hang until the timeout.
+        if self.settings.smtp_use_ssl or port == 465:
+            client = smtplib.SMTP_SSL(
+                host, port, timeout=timeout, context=ssl.create_default_context()
+            )
+        else:
+            client = smtplib.SMTP(host, port, timeout=timeout)
+        with client as smtp:
+            if not isinstance(smtp, smtplib.SMTP_SSL) and self.settings.smtp_starttls:
+                smtp.starttls(context=ssl.create_default_context())
             if self.settings.smtp_username:
                 smtp.login(
                     self.settings.smtp_username, self.settings.smtp_password or ""

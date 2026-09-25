@@ -45,8 +45,10 @@ materials = [
 test = [
   "pytest>=8,<9",
   "pytest-asyncio>=0.24,<1",
+  "pytest-timeout>=2.3,<3",
   "respx>=0.21,<1",
 ]
+dev = ["ruff>=0.8,<1"]
 desktop = ["pyinstaller>=6.11,<7"]
 
 [tool.hatch.build.targets.wheel]
@@ -56,3 +58,22 @@ packages = ["backend/canvas_helper"]
 pythonpath = ["backend"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+# Correctness rules only. Import ordering and syntax modernisation are
+# deliberately left out: enabling them would reformat most of the tree and
+# bury real findings under churn. Add them in a dedicated pass.
+select = ["E", "F", "W", "B", "C4", "ASYNC"]
+ignore = [
+  "E501",      # line length is enforced by the formatter, not the linter
+  "B008",      # FastAPI's Depends() in defaults is the documented idiom
+  "B009",      # getattr(sys, "_MEIPASS") is intentional: PyInstaller-only
+  "C408",      # dict(...) with keyword arguments reads better in test setup
+  "ASYNC109",  # SyncJobQueue.wait takes an explicit timeout by design
+  "ASYNC240",  # one-off Path.is_file()/resolve() calls, not hot paths
+]

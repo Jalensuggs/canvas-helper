@@ -12,10 +12,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN python -m venv /opt/venv \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin canvas
 WORKDIR /app
-COPY pyproject.toml alembic.ini ./
+COPY pyproject.toml alembic.ini requirements.lock ./
 COPY backend/ backend/
 COPY migrations/ migrations/
-RUN pip install --no-cache-dir .
+# Install the pinned dependency set first, then the package itself without
+# resolving again, so an image rebuilt months later gets the same versions.
+# The 'ai' extra is not optional for the server image: without it every
+# /api/ai/chat request fails with "Install the optional 'ai' dependency".
+RUN pip install --no-cache-dir -r requirements.lock \
+    && pip install --no-cache-dir --no-deps ".[ai]"
 COPY --from=frontend /build/frontend/dist frontend/dist
 COPY docker/entrypoint.sh /usr/local/bin/canvas-helper-entrypoint
 RUN chmod 0555 /usr/local/bin/canvas-helper-entrypoint \

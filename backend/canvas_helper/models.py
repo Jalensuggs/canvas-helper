@@ -55,7 +55,12 @@ class MagicLinkToken(Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Keyed HMAC of the requesting address, never the address itself, so the
+    # per-IP quota survives in the database without storing client PII.
+    requester_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
 
 
 class UserSession(Base):
@@ -64,6 +69,13 @@ class UserSession(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     csrf_hash: Mapped[str] = mapped_column(String(64))
+    # The just-rotated credentials stay valid briefly so that requests already
+    # in flight when rotation happens are not logged out.
+    previous_token_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    previous_csrf_hash: Mapped[str | None] = mapped_column(String(64))
+    previous_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     rotated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

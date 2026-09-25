@@ -51,6 +51,7 @@ import {
   X,
 } from "lucide-react";
 import { ApiError, api, idOf, JsonObject, listFrom, streamChat, syncEventSource, text } from "./lib/api";
+import { ErrorBoundary } from "./ErrorBoundary";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -315,6 +316,8 @@ function AppShell({ me, offline }: { me: JsonObject; offline: boolean }) {
           </div>
         </header>
         <div className="page-wrap">
+          {/* Keyed on the path so navigating away clears a failed page. */}
+          <ErrorBoundary key={location.pathname}>
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/calendar" element={<CalendarPage />} />
@@ -330,6 +333,7 @@ function AppShell({ me, offline }: { me: JsonObject; offline: boolean }) {
             <Route path="/settings" element={<SettingsPage me={me} />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          </ErrorBoundary>
         </div>
       </main>
       <nav className="mobile-nav">
@@ -1109,8 +1113,16 @@ function AIPage() {
     citations?: JsonObject[];
     usage?: JsonObject;
   }>>([]);
+  // A chat stream outlives the page unless it is cancelled on unmount, which
+  // leaves the request running and its callback writing into a dead component.
+  const abortRef = React.useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
   const mutation = useMutation({
-    mutationFn: (content: string) => streamChat(
+    mutationFn: (content: string) => {
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      return streamChat(
       content,
       assignmentId ? { assignment_id: assignmentId } : courseId ? { course_id: courseId } : {},
       (event) => setMessages((old) => {
@@ -1124,12 +1136,17 @@ function AIPage() {
         if (event.type === "error") next[index] = { ...current, content: `请求失败：${event.error}` };
         return next;
       }),
-    ),
-    onError: (error) => setMessages((old) => {
-      const next = [...old];
-      if (next.at(-1)?.role === "assistant") next[next.length - 1] = { role: "assistant", content: `请求失败：${errorMessage(error)}` };
-      return next;
-    }),
+      controller.signal,
+      );
+    },
+    onError: (error) => {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setMessages((old) => {
+        const next = [...old];
+        if (next.at(-1)?.role === "assistant") next[next.length - 1] = { role: "assistant", content: `请求失败：${errorMessage(error)}` };
+        return next;
+      });
+    },
   });
   const submit = (content: string) => {
     if (!content.trim() || mutation.isPending) return;

@@ -23,9 +23,13 @@ class ChatProvider(Protocol):
     ) -> ProviderResult: ...
 
 
+DEFAULT_TIMEOUT_SECONDS = 60.0
+MAX_OUTPUT_TOKENS = 1200
+
+
 class AnthropicProvider:
-    def __init__(self, api_key: str, model: str):
-        self.api_key, self.model = api_key, model
+    def __init__(self, api_key: str, model: str, timeout: float = DEFAULT_TIMEOUT_SECONDS):
+        self.api_key, self.model, self.timeout = api_key, model, timeout
 
     async def chat(
         self, messages: list[dict[str, str]], system: str
@@ -34,9 +38,15 @@ class AnthropicProvider:
             from anthropic import AsyncAnthropic
         except ImportError as exc:
             raise AIUnavailable("Install the optional 'ai' dependency") from exc
-        response = await AsyncAnthropic(api_key=self.api_key).messages.create(
-            model=self.model, max_tokens=1200, system=system, messages=messages
-        )
+        # The client owns an HTTP connection pool; closing it keeps a chat per
+        # request from leaking one pool per request.
+        async with AsyncAnthropic(api_key=self.api_key, timeout=self.timeout) as client:
+            response = await client.messages.create(
+                model=self.model,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                system=system,
+                messages=messages,
+            )
         value = "".join(
             block.text for block in response.content
             if getattr(block, "type", "") == "text"
@@ -52,8 +62,8 @@ class AnthropicProvider:
 
 
 class OpenAIProvider:
-    def __init__(self, api_key: str, model: str):
-        self.api_key, self.model = api_key, model
+    def __init__(self, api_key: str, model: str, timeout: float = DEFAULT_TIMEOUT_SECONDS):
+        self.api_key, self.model, self.timeout = api_key, model, timeout
 
     async def chat(
         self, messages: list[dict[str, str]], system: str
@@ -62,10 +72,11 @@ class OpenAIProvider:
             from openai import AsyncOpenAI
         except ImportError as exc:
             raise AIUnavailable("Install the optional 'ai' dependency") from exc
-        response = await AsyncOpenAI(api_key=self.api_key).chat.completions.create(
-            model=self.model,
-            messages=[{"role": "system", "content": system}, *messages],
-        )
+        async with AsyncOpenAI(api_key=self.api_key, timeout=self.timeout) as client:
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "system", "content": system}, *messages],
+            )
         usage = response.usage
         return ProviderResult(
             response.choices[0].message.content or "",
@@ -108,11 +119,13 @@ class AIService:
         provider: str = "anthropic",
         *,
         client: ChatProvider | None = None,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ):
         self.api_key = api_key
         self.model = model
         self.provider_name = provider
         self.client = client
+        self.timeout = timeout
 
     @property
     def available(self) -> bool:
@@ -139,9 +152,9 @@ class AIService:
         if not self.model:
             raise AIUnavailable("AI is disabled: configure a provider model")
         if self.provider_name == "anthropic":
-            return AnthropicProvider(self.api_key, self.model)
+            return AnthropicProvider(self.api_key, self.model, self.timeout)
         if self.provider_name == "openai":
-            return OpenAIProvider(self.api_key, self.model)
+            return OpenAIProvider(self.api_key, self.model, self.timeout)
         raise AIUnavailable("Unsupported AI provider")
 
     async def chat(
