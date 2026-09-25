@@ -16,8 +16,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e ".[test]"
-      - run: pytest -q
+      - run: pip install -e ".[dev,test]"
+      - run: ruff check backend tests scripts migrations
+        # A hung test is indistinguishable from a slow one without a bound; the
+        # suite runs in seconds, so anything near a minute is a wedge.
+      - run: pytest -q --timeout=120
+        timeout-minutes: 5
       - name: Verify SQLite migrations
         run: |
           export CANVAS_HELPER_DATABASE_URL=sqlite:///./migration-check.db
@@ -45,11 +49,18 @@ jobs:
           cache: pip
       - run: pip install -e .
       - name: Upgrade PostgreSQL from empty database
+        # The async URL is what the compose file actually sets, so this is the
+        # rewrite path that matters; a bare postgresql:// URL resolves to a
+        # driver that is not installed.
         env:
-          CANVAS_HELPER_DATABASE_URL: postgresql+psycopg://canvas:test-password@127.0.0.1:5432/canvas_test
+          CANVAS_HELPER_DATABASE_URL: postgresql+asyncpg://canvas:test-password@127.0.0.1:5432/canvas_test
         run: |
           alembic upgrade head
           test "$(alembic current | awk '{print $1}')" = "$(alembic heads | awk '{print $1}')"
+      - name: Re-running migrations is a no-op
+        env:
+          CANVAS_HELPER_DATABASE_URL: postgresql+asyncpg://canvas:test-password@127.0.0.1:5432/canvas_test
+        run: alembic upgrade head
 
   frontend:
     runs-on: ubuntu-latest

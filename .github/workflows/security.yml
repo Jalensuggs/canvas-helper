@@ -8,6 +8,9 @@ on:
 
 permissions:
   contents: read
+  # gitleaks lists the pull request's commits; without this it gets a 403
+  # "Resource not accessible by integration" on every pull_request run.
+  pull-requests: read
 
 jobs:
   secrets-and-privacy:
@@ -20,8 +23,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Reject committed private runtime data
+        # Anchored to the repository root, matching the /data/ and /materials/
+        # entries in .gitignore. An unanchored pattern also matched the
+        # backend/canvas_helper/materials/ source package, so this guard failed
+        # on every run regardless of what was committed.
         run: |
-          ! git ls-files | grep -E '(^|/)(data|materials|\.secrets)/|\.db(-shm|-wal)?$|(^|/)\.env$'
+          ! git ls-files | grep -E '^(data|materials|\.secrets)/|\.db(-shm|-wal)?$|(^|/)\.env$'
 
   dependencies:
     runs-on: ubuntu-latest

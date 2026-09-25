@@ -1,10 +1,32 @@
-.PHONY: install install-desktop dev backend frontend migrate test build check \
-	desktop-sidecar desktop-dev desktop-build desktop-check docker-build docker-config
+.PHONY: install install-desktop dev backend frontend migrate test lint build check \
+	lock desktop-sidecar desktop-dev desktop-build desktop-check docker-build docker-config
+
+# pyproject requires >=3.12; picking the interpreter explicitly turns a
+# confusing pip resolution error into an obvious missing-interpreter one.
+PYTHON ?= python3.12
 
 install:
-	python3 -m venv .venv
-	.venv/bin/python -m pip install -e ".[ai,test]"
+	$(PYTHON) -m venv .venv
+	.venv/bin/python -m pip install -e ".[ai,dev,test]"
 	cd frontend && npm ci
+
+lock:
+	rm -rf .lockenv
+	$(PYTHON) -m venv .lockenv
+	.lockenv/bin/python -m pip install --quiet --upgrade pip
+	.lockenv/bin/python -m pip install --quiet ".[ai]"
+	printf '%s\n' \
+		'# Pinned runtime dependencies for the server image.' \
+		'#' \
+		'# Regenerate after changing pyproject.toml:' \
+		'#     make lock' \
+		'#' \
+		'# Resolved on Python 3.12 / linux for the "ai" extra. Without a lock, a rebuilt' \
+		'# image silently picks up new majors of SQLAlchemy, FastAPI and the provider' \
+		'# SDKs; the Postgres driver default in particular moved between SQLAlchemy' \
+		'# 2.0 and 2.1.' > requirements.lock
+	.lockenv/bin/python -m pip freeze --exclude-editable | grep -v '^canvas-helper' | sort >> requirements.lock
+	rm -rf .lockenv
 
 install-desktop: install
 	.venv/bin/python -m pip install -e ".[desktop]"
@@ -25,21 +47,33 @@ test:
 	.venv/bin/pytest -q
 	cd frontend && npm test
 
+# Correctness linting only. `ruff format` would rewrite most of the tree, so
+# adopting it deserves its own commit rather than riding along with CI.
+lint:
+	.venv/bin/ruff check backend tests scripts migrations
+
 build:
 	cd frontend && npm run build
 
-check: test build docker-config
+check: lint test build docker-config
 
 desktop-sidecar: build
 	.venv/bin/python scripts/build_sidecar.py
 
+# The tauri CLI finds the project by looking for tauri.conf.json in a subfolder
+# of the working directory, so it runs from the repository root, not frontend/.
+# It still runs beforeDevCommand/beforeBuildCommand in the frontend directory.
+TAURI ?= ./frontend/node_modules/.bin/tauri
+
 desktop-dev: desktop-sidecar
-	cd frontend && npx tauri dev --config ../src-tauri/tauri.conf.json
+	$(TAURI) dev
 
 desktop-build: desktop-sidecar
-	cd frontend && npx tauri build --config ../src-tauri/tauri.conf.json
+	$(TAURI) build
 
-desktop-check:
+# cargo check needs the sidecar first: tauri.conf.json declares it as an
+# externalBin, and a missing one fails the build script.
+desktop-check: desktop-sidecar
 	cd src-tauri && cargo check
 
 docker-build:

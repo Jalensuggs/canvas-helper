@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .canvas.client import CanvasClient
+from .config import Settings, get_settings
 from .models import CanvasAccount, SyncJob, SyncSchedule
 from .sync import SyncService
 
@@ -100,18 +101,23 @@ class SyncJobQueue:
         canvas_for_user: Callable[[str], Awaitable[CanvasClient]],
         *,
         lease_seconds: int = 120,
-        poll_seconds: float = 0.25,
+        poll_seconds: float = 2.0,
         materials_root: Path | None = None,
+        event_poll_seconds: float = 3.0,
+        settings: Settings | None = None,
     ):
         self.sessions = sessions
         self.canvas_for_user = canvas_for_user
+        self.settings = settings or get_settings()
         self.lease_seconds = lease_seconds
         self.poll_seconds = poll_seconds
+        self.event_poll_seconds = event_poll_seconds
         self.materials_root = materials_root
         self.worker_id = f"worker-{uuid.uuid4()}"
         self._worker_task: asyncio.Task[None] | None = None
         self._scheduler_task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
+        self._last_recovery = 0.0
 
     async def enqueue(
         self, user_id: str, job: str, *, max_attempts: int = 4
@@ -180,7 +186,12 @@ class SyncJobQueue:
             return len(rows)
 
     async def claim(self) -> SyncJob | None:
-        await self.recover_stale()
+        # Lease recovery scans every running job, so it runs on its own slow
+        # cadence rather than on every poll of an otherwise idle queue.
+        loop_time = asyncio.get_running_loop().time()
+        if loop_time - self._last_recovery >= max(1.0, self.lease_seconds / 2):
+            self._last_recovery = loop_time
+            await self.recover_stale()
         now = utcnow()
         async with self.sessions() as session:
             candidates = list(
@@ -309,7 +320,11 @@ class SyncJobQueue:
         try:
             canvas = await self.canvas_for_user(row.user_id)
             result = await SyncService(
-                self.sessions, canvas, row.user_id, self.materials_root
+                self.sessions,
+                canvas,
+                row.user_id,
+                self.materials_root,
+                settings=self.settings,
             ).execute(row.job)
         except asyncio.CancelledError as exc:
             await self._retry_or_fail(row, exc)
@@ -421,14 +436,24 @@ class SyncJobQueue:
         now = utcnow()
         due: list[tuple[str, str]] = []
         async with self.sessions() as session:
-            users = list((await session.scalars(select(CanvasAccount.user_id).distinct())).all())
+            users = list(
+                (await session.scalars(select(CanvasAccount.user_id).distinct())).all()
+            )
+            if not users:
+                return 0
+            # One query for every schedule of every active user, instead of one
+            # query per user per job on each scheduler tick.
+            existing = {
+                (row.user_id, row.job): row
+                for row in (
+                    await session.scalars(
+                        select(SyncSchedule).where(SyncSchedule.user_id.in_(users))
+                    )
+                ).all()
+            }
             for user_id in users:
                 for job, interval in SCHEDULE_DEFAULTS.items():
-                    schedule = await session.scalar(
-                        select(SyncSchedule).where(
-                            SyncSchedule.user_id == user_id, SyncSchedule.job == job
-                        )
-                    )
+                    schedule = existing.get((user_id, job))
                     if schedule is None:
                         session.add(
                             SyncSchedule(
@@ -440,7 +465,9 @@ class SyncJobQueue:
                         )
                         due.append((user_id, job))
                     elif aware(schedule.next_run_at) <= now:
-                        schedule.next_run_at = now + timedelta(seconds=schedule.interval_seconds)
+                        schedule.next_run_at = now + timedelta(
+                            seconds=schedule.interval_seconds
+                        )
                         schedule.updated_at = now
                         due.append((user_id, job))
             try:
@@ -448,6 +475,7 @@ class SyncJobQueue:
             except IntegrityError:
                 # Another scheduler may have initialized the same user/job.
                 await session.rollback()
+                return 0
         for user_id, job in due:
             await self.enqueue(user_id, job)
         return len(due)
@@ -493,7 +521,11 @@ class SyncJobQueue:
             return row
 
     async def wait(self, user_id: str, job_id: str, timeout: float = 30) -> SyncJob:
-        deadline = asyncio.get_running_loop().time() + timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        # Back off from a snappy first check to a modest steady-state poll, so a
+        # long wait costs a handful of queries rather than one every 20ms.
+        delay = 0.05
         while True:
             async with self.sessions() as session:
                 row = await session.scalar(
@@ -505,9 +537,11 @@ class SyncJobQueue:
                     raise LookupError(job_id)
                 if row.status in TERMINAL_STATES:
                     return row
-            if asyncio.get_running_loop().time() >= deadline:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
                 raise TimeoutError(job_id)
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(min(delay, remaining))
+            delay = min(delay * 1.6, 1.0)
 
     async def status(self, user_id: str, limit: int = 30) -> dict[str, Any]:
         async with self.sessions() as session:
@@ -569,14 +603,39 @@ class SyncJobQueue:
             },
         }
 
+    async def fingerprint(self, user_id: str) -> tuple[int, str]:
+        """Cheap probe telling whether this user's queue state can have moved.
+
+        The full status payload costs four queries, which is far too much to run
+        on a timer for every connected browser. This is one aggregate query, and
+        the expensive payload is only built when it changes.
+        """
+        async with self.sessions() as session:
+            row = (
+                await session.execute(
+                    select(
+                        func.count(SyncJob.id),
+                        func.max(SyncJob.updated_at),
+                    ).where(SyncJob.user_id == user_id)
+                )
+            ).one()
+        return int(row[0] or 0), str(row[1] or "")
+
     async def event_stream(self, user_id: str):
-        previous = ""
+        previous_payload = ""
+        previous_mark: tuple[int, str] | None = None
         while True:
-            payload = await self.status(user_id)
-            encoded = json.dumps(payload, separators=(",", ":"), default=str)
-            if encoded != previous:
-                yield f"event: sync\ndata: {encoded}\n\n"
-                previous = encoded
-            else:
+            emitted = False
+            mark = await self.fingerprint(user_id)
+            if mark != previous_mark:
+                previous_mark = mark
+                encoded = json.dumps(
+                    await self.status(user_id), separators=(",", ":"), default=str
+                )
+                if encoded != previous_payload:
+                    previous_payload = encoded
+                    emitted = True
+                    yield f"event: sync\ndata: {encoded}\n\n"
+            if not emitted:
                 yield ": keep-alive\n\n"
-            await asyncio.sleep(1)
+            await asyncio.sleep(self.event_poll_seconds)

@@ -5,6 +5,13 @@ canvas.example.com {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
+		# The app is a single-page frontend talking to its own API; nothing is
+		# loaded from a third party. Framing is same-origin only rather than
+		# denied outright, because material previews render in a sandboxed
+		# same-origin iframe.
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'self'; frame-ancestors 'self'"
+		X-Frame-Options "SAMEORIGIN"
+		Cross-Origin-Opener-Policy "same-origin"
 		-Server
 	}
 }

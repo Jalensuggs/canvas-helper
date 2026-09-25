@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -7,10 +7,17 @@ import mimetypes
 from pathlib import Path
 import sys
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +27,7 @@ from .actions import ActionError, ActionService
 from .ai import AIService, AIUnavailable, sse_event
 from .auth import AuthService
 from .canvas.client import CanvasClient
+from .canvas.pool import CanvasClientPool
 from .config import Settings, get_settings
 from .credentials import CredentialVault
 from .db import (
@@ -36,6 +44,7 @@ from .models import (
     Course,
     DocChunk,
     Document,
+    LOCAL_USER_ID,
     LocalTodo,
     Note,
     NoteRevision,
@@ -48,6 +57,7 @@ from .job_queue import SyncJobQueue, job_out
 from .materials import MaterialStore, refresh_document_extraction
 from .materials.refresh import backfill_material_extractions_later
 from .redact import configure_logging
+from .retention import retention_loop
 from .secret_store import (
     KeyringSecretStore,
     MigratingKeyringSecretStore,
@@ -141,6 +151,11 @@ class ChatInput(BaseModel):
         return self
 
 
+# Longest the app waits for cancelled background work before disposing the
+# engine and exiting anyway.
+SHUTDOWN_GRACE_SECONDS = 5.0
+
+
 def iso(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -187,20 +202,11 @@ def planner_completed(row: PlannerItem) -> bool:
     )
 
 
-def current_term_start() -> datetime:
-    local_now = datetime.now(ZoneInfo("Australia/Sydney"))
-    start_month = 7 if local_now.month >= 7 else 1
-    return datetime(
-        local_now.year,
-        start_month,
-        1,
-        tzinfo=ZoneInfo("Australia/Sydney"),
-    ).astimezone(timezone.utc)
-
-
-async def current_course_ids(session: AsyncSession, user_id: str) -> set[int]:
+async def current_course_ids(
+    session: AsyncSession, user_id: str, settings: Settings
+) -> set[int]:
     """Infer the current teaching period when Canvas omits term dates."""
-    start = current_term_start()
+    start = settings.current_term_start()
     rows = (
         await session.scalars(
             select(Assignment).where(
@@ -346,8 +352,15 @@ def create_app(
 ) -> FastAPI:
     settings = settings or get_settings()
     configure_logging()
-    engine = make_engine(settings.database_url)
+    engine = make_engine(settings.database_url, settings)
     sessions = make_session_factory(engine)
+    background_tasks: set[asyncio.Task[Any]] = set()
+
+    def spawn(coroutine) -> None:
+        """Run a background coroutine, holding a reference so it is not GC'd."""
+        task = asyncio.create_task(coroutine)
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
     if settings.allow_development_secret_file:
         secret_store = RestrictedFileSecretStore(settings.data_dir / "secrets.json")
     else:
@@ -366,25 +379,26 @@ def create_app(
         encryption_key=settings.credential_encryption_key,
         key_version=settings.credential_key_version,
     )
-    canvas_clients: dict[str, CanvasClient] = {}
+    canvas_clients = CanvasClientPool(transport=canvas_transport)
 
     async def worker_canvas_for(user_id: str) -> CanvasClient:
         async with sessions() as session:
             token = await credentials.get(session, user_id, "canvas_token")
             if not token:
                 raise RuntimeError("Canvas token is not configured")
-            if user_id not in canvas_clients:
-                base_url = (
-                    await credentials.get(session, user_id, "canvas_base_url")
-                    or str(settings.canvas_base_url)
-                )
-                canvas_clients[user_id] = CanvasClient(
-                    base_url, token, transport=canvas_transport
-                )
-            return canvas_clients[user_id]
+            base_url = (
+                await credentials.get(session, user_id, "canvas_base_url")
+                or str(settings.canvas_base_url)
+            )
+            return await canvas_clients.get(user_id, base_url, token)
 
     sync_queue = SyncJobQueue(
-        sessions, worker_canvas_for, materials_root=settings.data_dir / "materials"
+        sessions,
+        worker_canvas_for,
+        materials_root=settings.data_dir / "materials",
+        poll_seconds=settings.worker_poll_seconds,
+        event_poll_seconds=settings.sync_event_poll_seconds,
+        settings=settings,
     )
 
     @asynccontextmanager
@@ -401,16 +415,30 @@ def create_app(
         async with sessions() as session:
             await backfill_search_chunks(session)
         if settings.deployment_mode == "local_desktop":
+            # In server mode the worker process owns both of these; running
+            # them here too would just duplicate the work.
             sync_queue.start()
-            asyncio.create_task(
+            spawn(
                 backfill_material_extractions_later(
                     sessions, settings.data_dir / "materials"
                 )
             )
+            spawn(retention_loop(sessions, settings))
         yield
+        pending = list(background_tasks)
+        for task in pending:
+            task.cancel()
+        if pending:
+            # A task cancelled mid-query can be slow, or stuck, returning its
+            # connection to the pool. Shutdown must not hang on that: the
+            # engine is disposed below either way.
+            with suppress(TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=SHUTDOWN_GRACE_SECONDS,
+                )
         await sync_queue.stop()
-        for canvas in canvas_clients.values():
-            await canvas.close()
+        await canvas_clients.close()
         await engine.dispose()
 
     app = FastAPI(
@@ -477,19 +505,13 @@ def create_app(
         )
         if not token:
             raise HTTPException(status_code=503, detail="Canvas token is not configured")
-        if user.id not in canvas_clients:
-            base_url = (
-                await request.app.state.credentials.get(
-                    session, user.id, "canvas_base_url"
-                )
-                or str(settings.canvas_base_url)
+        base_url = (
+            await request.app.state.credentials.get(
+                session, user.id, "canvas_base_url"
             )
-            canvas_clients[user.id] = CanvasClient(
-                base_url,
-                token,
-                transport=request.app.state.canvas_transport,
-            )
-        return canvas_clients[user.id]
+            or str(settings.canvas_base_url)
+        )
+        return await request.app.state.canvas.get(user.id, base_url, token)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -498,11 +520,15 @@ def create_app(
     @app.post("/api/auth/request-link", status_code=202)
     async def request_magic_link(
         body: MagicLinkRequest,
+        request: Request,
+        background: BackgroundTasks,
         session: AsyncSession = Depends(session_dependency),
     ) -> dict[str, str]:
         if settings.deployment_mode != "server":
             raise HTTPException(status_code=404, detail="Not found")
-        await auth.request_link(session, body.email)
+        await auth.request_link(
+            session, body.email, request=request, background=background
+        )
         return {"status": "sent"}
 
     @app.post("/api/auth/verify")
@@ -632,9 +658,7 @@ def create_app(
             session, user.id, "canvas_base_url", canvas_url
         )
         await register_canvas_account(session, user, canvas_url, profile)
-        old = request.app.state.canvas.pop(user.id, None)
-        if old:
-            await old.close()
+        await request.app.state.canvas.discard(user.id)
         return {
             "configured": True,
             "canvas_user": {"id": profile.get("id"), "name": profile.get("name")},
@@ -687,7 +711,7 @@ def create_app(
         user: CurrentUser,
         session: AsyncSession = Depends(session_dependency),
     ) -> list[dict[str, Any]]:
-        course_ids = await current_course_ids(session, user.id)
+        course_ids = await current_course_ids(session, user.id, settings)
         rows = (
             await session.scalars(
                 select(Course)
@@ -817,7 +841,7 @@ def create_app(
         limit: int = Query(default=200, ge=1, le=500),
         session: AsyncSession = Depends(session_dependency),
     ) -> list[dict[str, Any]]:
-        current_ids = await current_course_ids(session, user.id)
+        current_ids = await current_course_ids(session, user.id, settings)
         courses = list(
             (
                 await session.scalars(
@@ -979,7 +1003,7 @@ def create_app(
         course_id: int | None = None,
         session: AsyncSession = Depends(session_dependency),
     ) -> list[dict[str, Any]]:
-        course_ids = await current_course_ids(session, user.id)
+        course_ids = await current_course_ids(session, user.id, settings)
         if course_id is not None:
             course_row = await session.scalar(
                 select(Course).where(
@@ -1052,8 +1076,8 @@ def create_app(
         include_completed: bool = False,
         session: AsyncSession = Depends(session_dependency),
     ) -> dict[str, Any]:
-        term_start = current_term_start()
-        course_ids = await current_course_ids(session, user.id)
+        term_start = settings.current_term_start()
+        course_ids = await current_course_ids(session, user.id, settings)
         all_assignments = (
             await session.scalars(
                 select(Assignment)
@@ -1166,7 +1190,7 @@ def create_app(
         session: AsyncSession = Depends(session_dependency),
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
-        course_ids = await current_course_ids(session, user.id)
+        course_ids = await current_course_ids(session, user.id, settings)
         counts = {
             "courses": len(course_ids),
             "assignments": await session.scalar(
@@ -1256,7 +1280,13 @@ def create_app(
         if row is None:
             raise HTTPException(status_code=404, detail="Todo not found")
         for key, value in body.model_dump(exclude_unset=True).items():
-            setattr(row, key, value.strip() if key == "title" else value)
+            if key == "title":
+                # An explicit null is a client mistake, not a request to clear
+                # a non-nullable column.
+                if value is None:
+                    raise HTTPException(status_code=422, detail="Title cannot be null")
+                value = value.strip()
+            setattr(row, key, value)
         await session.commit()
         return todo_out(row)
 
@@ -1427,6 +1457,10 @@ def create_app(
         if row.version != body.version:
             raise HTTPException(status_code=409, detail={"message": "Note changed elsewhere", "note": note_out(row)})
         changes = body.model_dump(exclude_unset=True, exclude={"version"})
+        if any(changes.get(key) is None for key in ("title", "markdown") if key in changes):
+            raise HTTPException(
+                status_code=422, detail="Title and markdown cannot be null"
+            )
         if "title" in changes:
             changes["title"] = changes["title"].strip()
         if not changes or all(getattr(row, key) == value for key, value in changes.items()):
@@ -1641,6 +1675,9 @@ def create_app(
         await_job: bool = Query(False, alias="await"),
         timeout: float = Query(30, ge=0.1, le=120),
     ) -> dict[str, Any]:
+        # A held-open request is a cheap way to tie up a worker, so the caller's
+        # timeout is clamped to the configured server-side ceiling.
+        timeout = min(timeout, settings.sync_wait_max_seconds)
         try:
             row, created = await sync_queue.enqueue(user.id, job)
         except ValueError as exc:
@@ -1694,11 +1731,10 @@ def create_app(
         request: Request,
         user: CurrentUser,
     ) -> dict[str, Any]:
+        # Previews are computed from local state only; nothing is sent to Canvas
+        # until the confirmation token is executed.
         service = ActionService(
-            sessions,
-            settings.action_token_ttl_seconds,
-            user.id,
-            request.app.state.canvas.get(user.id),
+            sessions, settings.action_token_ttl_seconds, user.id, None
         )
         try:
             return await service.preview(action, body.model_dump())
@@ -1786,10 +1822,17 @@ def create_app(
             model = await request.app.state.credentials.get(
                 session, user.id, f"{provider}_model"
             )
-            if user.id == "00000000-0000-0000-0000-000000000001":
+            # Only the single desktop owner may fall back to process-wide keys;
+            # in server mode every user supplies their own.
+            if user.id == LOCAL_USER_ID:
                 api_key = api_key or getattr(settings, f"{provider}_api_key", None)
                 model = model or getattr(settings, f"{provider}_model", None)
-            service = AIService(api_key, model, provider)
+            service = AIService(
+                api_key,
+                model,
+                provider,
+                timeout=settings.ai_request_timeout_seconds,
+            )
             wants_stream = body.stream or "text/event-stream" in request.headers.get(
                 "accept", ""
             )

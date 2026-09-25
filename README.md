@@ -74,6 +74,24 @@ CANVAS_HELPER_SMTP_USERNAME=你的发信账号
 CANVAS_HELPER_SMTP_PASSWORD=你的发信密码
 ```
 
+**强烈建议同时限制谁能注册。** 不设置的话，任何知道网址的人都能注册账号：
+
+```bash
+# 只允许这些邮箱域名登录（逗号分隔）
+CANVAS_HELPER_ALLOWED_EMAIL_DOMAINS=student.uts.edu.au
+```
+
+登录邮件接口默认已经限流（每个邮箱每小时 5 封、每个 IP 每小时 20 封），
+可以用 `CANVAS_HELPER_MAGIC_LINK_PER_EMAIL_PER_HOUR` 和
+`CANVAS_HELPER_MAGIC_LINK_PER_IP_PER_HOUR` 调整。
+
+如果学校不是 UTS，改一下学期推断用的时区和开学月份：
+
+```bash
+CANVAS_HELPER_ACADEMIC_TIMEZONE=Asia/Shanghai
+CANVAS_HELPER_TERM_START_MONTHS=3,9
+```
+
 生成加密密钥：
 
 ```bash
@@ -134,16 +152,37 @@ docker compose --env-file .env up -d --build
 | `CANVAS_HELPER_PUBLIC_URL` | 线上 HTTPS 根地址 |
 | `CANVAS_HELPER_CREDENTIAL_ENCRYPTION_KEY` | 线上必填，丢失后旧凭证无法解密 |
 | `CANVAS_HELPER_EMAIL_BACKEND` | 开发用 `development`，线上必须 `smtp` |
+| `CANVAS_HELPER_ALLOWED_EMAIL_DOMAINS` | 注册邮箱域名白名单（逗号分隔），留空表示不限制 |
+| `CANVAS_HELPER_MAGIC_LINK_PER_EMAIL_PER_HOUR` | 单邮箱每小时登录邮件上限，`0` 关闭 |
+| `CANVAS_HELPER_MAGIC_LINK_PER_IP_PER_HOUR` | 单来源每小时登录邮件上限，`0` 关闭 |
+| `CANVAS_HELPER_ACADEMIC_TIMEZONE` | 学期推断用的 IANA 时区 |
+| `CANVAS_HELPER_TERM_START_MONTHS` | 开学月份（逗号分隔，如 `1,7`） |
+| `CANVAS_HELPER_SMTP_USE_SSL` | 465 端口的隐式 TLS；端口为 465 时自动开启 |
+| `CANVAS_HELPER_SYNC_JOB_RETENTION_DAYS` | 同步任务记录保留天数，`0` 关闭清理 |
 
 完整示例见 [.env.example](.env.example)。
+
+## 上线前检查
+
+```bash
+make check          # ruff + pytest + 前端类型检查/测试 + 前端构建 + compose 校验
+```
+
+- `requirements.lock` 固定了服务端镜像的依赖版本。改过 `pyproject.toml` 后跑 `make lock` 重新生成，否则镜像重建时会装到不同的版本。
+- 镜像安装的是 `.[ai]`，所以线上模式的 AI 功能可用。去掉这个 extra 的话 `/api/ai/chat` 会一直返回 503。
+- 数据库迁移在 API 容器启动时执行；worker 容器通过 `CANVAS_HELPER_RUN_MIGRATIONS=false` 跳过。
+- PostgreSQL 上的中文检索依赖 `pg_trgm` 扩展。迁移会尝试创建它；如果数据库账号权限不足，迁移不会失败，但中文搜索会退化成全表扫描。授权后重跑 `alembic upgrade head` 即可建好索引。
 
 ## 安全
 
 - 本机模式只监听 `127.0.0.1`，写请求还要可信 Origin
 - 线上模式用 HttpOnly Session + CSRF，凭证 AES-GCM 加密
+- 登录邮件接口有按邮箱和按来源的限流，可选邮箱域名白名单
 - Canvas HTML 会净化；下载路径会检查穿越和符号链接
+- 反代示例已带 CSP、HSTS 和同源 frame 限制
 - 不要把 PostgreSQL、MinIO 或 8000 端口直接对公网开放
 - `*.env`、数据库、下载资料和密钥目录默认被 Git 忽略
+- Canvas Token 只应该从设置页填入，永远不要写进仓库里的文件或环境变量
 
 更多见 [PRIVACY.md](PRIVACY.md)、[SECURITY.md](SECURITY.md)、[docs/threat-model.md](docs/threat-model.md)。
 

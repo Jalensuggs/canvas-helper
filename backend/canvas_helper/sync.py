@@ -3,13 +3,13 @@ import logging
 from pathlib import Path
 import re
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .canvas.client import CanvasClient, CanvasPermissionError
+from .config import Settings, get_settings
 from .materials import MaterialStore, extract_document
 from .models import Announcement, Assignment, Course, Document, PlannerItem, SyncRun
 from .search import rebuild_document_chunks
@@ -44,11 +44,13 @@ class SyncService:
         canvas: CanvasClient,
         user_id: str,
         materials_root: Path | None = None,
+        settings: Settings | None = None,
     ):
         self.sessions = sessions
         self.canvas = canvas
         self.user_id = user_id
         self.materials_root = materials_root or (Path.home() / ".canvas-helper" / "materials")
+        self.settings = settings or get_settings()
 
     async def run(self, job: str) -> dict[str, Any]:
         """Run immediately while preserving the legacy SyncRun audit record."""
@@ -346,9 +348,16 @@ class SyncService:
             session.add(document)
             changed = True
         else:
+            # Every field below is copied into this document's chunks, so any of
+            # them changing means the chunks are stale.
             changed = (
                 document.title != (title[:500] or document.title)
                 or document.content != clean_content
+                or document.course_id != course_id
+                or document.source_url != source_url
+                or not datetimes_equal(
+                    document.source_updated_at, source_date or document.source_updated_at
+                )
             )
         document.title = title[:500] or document.title
         document.course_id = course_id
@@ -360,7 +369,11 @@ class SyncService:
         document.source_updated_at = source_date or document.source_updated_at
         document.updated_at = datetime.now(timezone.utc)
         await session.flush()
-        await rebuild_document_chunks(session, document)
+        # Rebuilding deletes and reinserts every chunk plus its full-text rows.
+        # Materials resync every 15 minutes, so doing that for unchanged sources
+        # would rewrite the whole index on each pass for no benefit.
+        if changed:
+            await rebuild_document_chunks(session, document)
         return changed
 
     async def _file_metadata(
@@ -429,30 +442,44 @@ class SyncService:
             prior_version=document.version or 0,
             expected_size=int(metadata["size"]) if metadata.get("size") is not None else None,
         )
-        extracted = extract_document(
-            result.path,
-            str(metadata.get("content-type") or metadata.get("content_type") or result.mime_type or ""),
+        content_type = str(
+            metadata.get("content-type")
+            or metadata.get("content_type")
+            or result.mime_type
+            or ""
         )
         now = datetime.now(timezone.utc)
+        # A byte-identical redownload needs no reparse. Extraction opens every
+        # PDF, DOCX and PPTX, so repeating it every 15 minutes is the single
+        # most expensive thing a steady-state sync could do.
+        reusable = (
+            not created
+            and result.unchanged
+            and bool(document.content)
+            and not (document.metadata_json or {}).get("extraction", {}).get("error")
+        )
+        if reusable:
+            extracted = None
+        else:
+            extracted = extract_document(result.path, content_type)
+            document.content = extracted.text
+            document.preview_html = extracted.preview_html
+            document.extracted_at = now
+
         document.course_id = course_id
         document.title = filename[:500]
         document.source_url = str(metadata["url"])
         document.local_path = store.relative(result.path)
         document.sha256 = result.sha256
         document.size = result.size
-        document.mime_type = str(
-            metadata.get("content-type") or metadata.get("content_type") or result.mime_type or ""
-        ) or None
+        document.mime_type = content_type or None
         document.version = result.version
         document.canvas_file_id = file_id
         document.kind = "file"
-        document.content = extracted.text
-        document.preview_html = extracted.preview_html
         document.source_updated_at = parse_datetime(
             metadata.get("updated_at") or metadata.get("modified_at")
         )
         document.downloaded_at = now
-        document.extracted_at = now
         document.updated_at = now
         document.metadata_json = {
             "canvas": {
@@ -460,11 +487,16 @@ class SyncService:
                 for key in ("id", "uuid", "display_name", "filename", "size", "content-type", "created_at", "updated_at")
             },
             "discovered_from": {"type": source_type, "id": source_id},
-            "extraction": {**extracted.metadata, "error": extracted.error},
+            "extraction": (
+                {**extracted.metadata, "error": extracted.error}
+                if extracted is not None
+                else (document.metadata_json or {}).get("extraction", {})
+            ),
             "preserved_path": store.relative(result.preserved_path) if result.preserved_path else None,
         }
         await session.flush()
-        await rebuild_document_chunks(session, document)
+        if extracted is not None:
+            await rebuild_document_chunks(session, document)
         return created or prior != (result.sha256, result.version)
 
     async def sync_materials(self) -> dict[str, int]:
@@ -665,15 +697,9 @@ class SyncService:
 
     async def sync_announcements(self) -> dict[str, int]:
         changed = 0
-        local_now = datetime.now(ZoneInfo("Australia/Sydney"))
-        start_month = 7 if local_now.month >= 7 else 1
-        start_date = f"{local_now.year}-{start_month:02d}-01"
-        start_at = datetime(
-            local_now.year,
-            start_month,
-            1,
-            tzinfo=ZoneInfo("Australia/Sydney"),
-        ).astimezone(timezone.utc)
+        start_at = self.settings.current_term_start()
+        local_start = start_at.astimezone(self.settings.tzinfo)
+        start_date = f"{local_start.year}-{local_start.month:02d}-01"
         async with self.sessions() as session:
             courses = list(
                 (

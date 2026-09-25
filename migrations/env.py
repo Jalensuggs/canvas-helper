@@ -4,18 +4,23 @@ import os
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from canvas_helper.db import Base
+from canvas_helper.db import Base, sync_database_url
 from canvas_helper import models  # noqa: F401
 
 config = context.config
 database_url = os.getenv("CANVAS_HELPER_DATABASE_URL")
 if database_url:
-    config.set_main_option(
-        "sqlalchemy.url",
-        database_url.replace("+aiosqlite", "").replace("+asyncpg", ""),
-    )
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    config.set_main_option("sqlalchemy.url", sync_database_url(database_url))
+# Only take over logging when Alembic is driven from the command line. The app
+# also runs migrations inside its own startup, and fileConfig would reconfigure
+# the root logger and disable every logger it does not name — which silently
+# killed uvicorn's access log and all application error logging for the rest of
+# the process, including the "magic-link delivery failed" that tells an operator
+# their SMTP settings are wrong.
+if config.config_file_name is not None and config.attributes.get(
+    "configure_logging", True
+):
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

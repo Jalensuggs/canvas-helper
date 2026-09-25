@@ -13,6 +13,7 @@ __all__ = [
     "ExtractionResult",
     "MaterialStore",
     "backfill_material_extractions",
+    "backfill_material_extractions_later",
     "extract_document",
     "refresh_document_extraction",
 ]
