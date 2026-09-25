@@ -188,6 +188,7 @@ make check          # ruff + pytest + 前端类型检查/测试 + 前端构建 +
 
 ## 文档
 
+- [**部署上线指南**（含完全免费的方案）](docs/deploy.md)
 - [本地开发](docs/local-development.md)
 - [Docker 自托管](docs/docker-self-host.md)
 - [桌面打包](docs/desktop-release.md)
