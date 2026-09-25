@@ -86,6 +86,9 @@ async def migrate_database(database_url: str) -> None:
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "migrations"))
     config.set_main_option("sqlalchemy.url", sync_database_url(database_url))
+    # The process running this already configured its own logging; env.py must
+    # not replace it. See the note there.
+    config.attributes["configure_logging"] = False
     await asyncio.to_thread(command.upgrade, config, "head")
 
 

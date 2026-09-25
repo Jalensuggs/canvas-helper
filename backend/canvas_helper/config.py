@@ -1,11 +1,36 @@
 from datetime import datetime, timezone
 from functools import lru_cache
+import json
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AnyHttpUrl, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+def _as_sequence(value: Any) -> Any:
+    """Accept a comma-separated list as well as a JSON array.
+
+    These settings are usually written into a shell-sourced .env, where the
+    quotes in ["a","b"] are eaten before the process ever sees them. Requiring
+    strict JSON means a one-character mistake stops the app from starting with
+    an error that does not say which setting is wrong — a bad trade for a
+    list of domains.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return ()
+    if text.startswith("["):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Most likely a shell-stripped ["a","b"]; fall through and treat
+            # the bracketed body as a plain comma-separated list.
+            text = text[1:-1] if text.endswith("]") else text[1:]
+    return [item.strip().strip("\"'") for item in text.split(",") if item.strip()]
 
 
 class Settings(BaseSettings):
@@ -39,14 +64,14 @@ class Settings(BaseSettings):
     # Academic calendar. Canvas often omits term dates, so the app infers the
     # current teaching period from these. Override them for other institutions.
     academic_timezone: str = "Australia/Sydney"
-    term_start_months: tuple[int, ...] = (1, 7)
+    term_start_months: Annotated[tuple[int, ...], NoDecode] = (1, 7)
 
     # Abuse limits for the public server mode. Magic links are unauthenticated,
     # so they are the one endpoint an anonymous caller can use to burn SMTP
     # quota or grow the token table.
     magic_link_per_email_per_hour: int = 5
     magic_link_per_ip_per_hour: int = 20
-    allowed_email_domains: tuple[str, ...] = ()
+    allowed_email_domains: Annotated[tuple[str, ...], NoDecode] = ()
 
     # Background retention sweeps. Zero disables an individual sweep.
     retention_sweep_seconds: int = 60 * 60
@@ -99,6 +124,14 @@ class Settings(BaseSettings):
             raise ValueError(f"Unknown IANA time zone: {value}") from exc
         return value
 
+    @field_validator("term_start_months", mode="before")
+    @classmethod
+    def split_month_numbers(cls, value: Any) -> Any:
+        parsed = _as_sequence(value)
+        if isinstance(parsed, (list, tuple)):
+            return tuple(int(item) for item in parsed)
+        return parsed
+
     @field_validator("term_start_months")
     @classmethod
     def require_month_numbers(cls, value: tuple[int, ...]) -> tuple[int, ...]:
@@ -108,12 +141,17 @@ class Settings(BaseSettings):
             raise ValueError("Term start months must be between 1 and 12")
         return tuple(sorted(set(value)))
 
-    @field_validator("allowed_email_domains")
+    @field_validator("allowed_email_domains", mode="before")
     @classmethod
-    def normalize_email_domains(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(
-            item.strip().lstrip("@").casefold() for item in value if item.strip()
-        )
+    def normalize_email_domains(cls, value: Any) -> Any:
+        parsed = _as_sequence(value)
+        if isinstance(parsed, (list, tuple)):
+            return tuple(
+                str(item).strip().lstrip("@").casefold()
+                for item in parsed
+                if str(item).strip()
+            )
+        return parsed
 
     @property
     def tzinfo(self) -> ZoneInfo:

@@ -77,8 +77,8 @@ CANVAS_HELPER_SMTP_PASSWORD=你的发信密码
 **强烈建议同时限制谁能注册。** 不设置的话，任何知道网址的人都能注册账号：
 
 ```bash
-# 只允许这些邮箱域名登录（JSON 列表）
-CANVAS_HELPER_ALLOWED_EMAIL_DOMAINS=["student.uts.edu.au"]
+# 只允许这些邮箱域名登录（逗号分隔）
+CANVAS_HELPER_ALLOWED_EMAIL_DOMAINS=student.uts.edu.au
 ```
 
 登录邮件接口默认已经限流（每个邮箱每小时 5 封、每个 IP 每小时 20 封），
@@ -89,7 +89,7 @@ CANVAS_HELPER_ALLOWED_EMAIL_DOMAINS=["student.uts.edu.au"]
 
 ```bash
 CANVAS_HELPER_ACADEMIC_TIMEZONE=Asia/Shanghai
-CANVAS_HELPER_TERM_START_MONTHS=[3,9]
+CANVAS_HELPER_TERM_START_MONTHS=3,9
 ```
 
 生成加密密钥：
@@ -152,11 +152,11 @@ docker compose --env-file .env up -d --build
 | `CANVAS_HELPER_PUBLIC_URL` | 线上 HTTPS 根地址 |
 | `CANVAS_HELPER_CREDENTIAL_ENCRYPTION_KEY` | 线上必填，丢失后旧凭证无法解密 |
 | `CANVAS_HELPER_EMAIL_BACKEND` | 开发用 `development`，线上必须 `smtp` |
-| `CANVAS_HELPER_ALLOWED_EMAIL_DOMAINS` | 注册邮箱域名白名单（JSON 列表），留空表示不限制 |
+| `CANVAS_HELPER_ALLOWED_EMAIL_DOMAINS` | 注册邮箱域名白名单（逗号分隔），留空表示不限制 |
 | `CANVAS_HELPER_MAGIC_LINK_PER_EMAIL_PER_HOUR` | 单邮箱每小时登录邮件上限，`0` 关闭 |
 | `CANVAS_HELPER_MAGIC_LINK_PER_IP_PER_HOUR` | 单来源每小时登录邮件上限，`0` 关闭 |
 | `CANVAS_HELPER_ACADEMIC_TIMEZONE` | 学期推断用的 IANA 时区 |
-| `CANVAS_HELPER_TERM_START_MONTHS` | 开学月份（JSON 列表，如 `[1,7]`） |
+| `CANVAS_HELPER_TERM_START_MONTHS` | 开学月份（逗号分隔，如 `1,7`） |
 | `CANVAS_HELPER_SMTP_USE_SSL` | 465 端口的隐式 TLS；端口为 465 时自动开启 |
 | `CANVAS_HELPER_SYNC_JOB_RETENTION_DAYS` | 同步任务记录保留天数，`0` 关闭清理 |
 
