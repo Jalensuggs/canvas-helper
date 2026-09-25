@@ -40,3 +40,8 @@ frontend/vite.config.d.ts
 .DS_Store
 .idea/
 .vscode/
+
+# Tauri generates a schema per platform under gen/schemas; keeping only the
+# ones the project ships avoids churn from whichever OS last ran a build.
+src-tauri/gen/schemas/linux-schema.json
+src-tauri/gen/schemas/windows-schema.json
