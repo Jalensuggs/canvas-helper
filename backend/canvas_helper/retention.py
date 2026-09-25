@@ -85,6 +85,10 @@ async def retention_loop(
     interval = settings.retention_sweep_seconds
     if interval <= 0:
         return
+    # Sweep on the interval, not at startup. Nothing here is urgent, and a
+    # table scan competing with the first requests — or with a process that
+    # exits seconds later — buys nothing.
+    await asyncio.sleep(interval)
     while True:
         try:
             async with sessions() as session:
@@ -96,3 +100,11 @@ async def retention_loop(
         except Exception:
             logger.exception("Retention sweep failed")
         await asyncio.sleep(interval)
+
+
+async def run_retention_once(
+    sessions: async_sessionmaker[AsyncSession], settings: Settings
+) -> dict[str, int]:
+    """Single sweep, for tests and one-off operator runs."""
+    async with sessions() as session:
+        return await sweep_once(session, settings)

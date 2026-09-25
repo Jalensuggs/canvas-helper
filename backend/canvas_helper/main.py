@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -149,6 +149,11 @@ class ChatInput(BaseModel):
         if not self.messages and not self.message:
             raise ValueError("message or messages is required")
         return self
+
+
+# Longest the app waits for cancelled background work before disposing the
+# engine and exiting anyway.
+SHUTDOWN_GRACE_SECONDS = 5.0
 
 
 def iso(value: datetime | None) -> str | None:
@@ -410,17 +415,28 @@ def create_app(
         async with sessions() as session:
             await backfill_search_chunks(session)
         if settings.deployment_mode == "local_desktop":
+            # In server mode the worker process owns both of these; running
+            # them here too would just duplicate the work.
             sync_queue.start()
             spawn(
                 backfill_material_extractions_later(
                     sessions, settings.data_dir / "materials"
                 )
             )
-        spawn(retention_loop(sessions, settings))
+            spawn(retention_loop(sessions, settings))
         yield
-        for task in list(background_tasks):
+        pending = list(background_tasks)
+        for task in pending:
             task.cancel()
-        await asyncio.gather(*background_tasks, return_exceptions=True)
+        if pending:
+            # A task cancelled mid-query can be slow, or stuck, returning its
+            # connection to the pool. Shutdown must not hang on that: the
+            # engine is disposed below either way.
+            with suppress(TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=SHUTDOWN_GRACE_SECONDS,
+                )
         await sync_queue.stop()
         await canvas_clients.close()
         await engine.dispose()

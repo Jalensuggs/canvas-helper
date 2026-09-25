@@ -20,6 +20,10 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
@@ -29,10 +33,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: pip install -e ".[desktop]"
       - run: npm ci
         working-directory: frontend
       - run: npm run build
         working-directory: frontend
+      # tauri.conf.json declares the backend as an externalBin, so cargo check
+      # fails with "resource path ... doesn't exist" unless the sidecar has
+      # been frozen for this runner's target triple first. Invoked directly
+      # rather than through the npm script, which hardcodes `python3`.
+      - run: python scripts/build_sidecar.py
       - run: cargo check
         working-directory: src-tauri
 
@@ -56,6 +66,10 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: pip install -e ".[desktop]"
       - run: npm ci
+        working-directory: frontend
+      # The sidecar embeds frontend/dist via PyInstaller --add-data, so the
+      # frontend must be built before it, not by tauri's beforeBuildCommand.
+      - run: npm run build
         working-directory: frontend
       - run: npm run desktop:sidecar
         working-directory: frontend

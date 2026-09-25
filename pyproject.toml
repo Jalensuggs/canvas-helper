@@ -20,7 +20,10 @@ dependencies = [
   "pydantic>=2.8,<3",
   "pydantic-settings>=2.4,<3",
   "nh3>=0.2.18,<1",
-  "cryptography>=43,<47",
+  # >=50 is the floor that clears PYSEC-2026-3552/3553/3554 and
+  # GHSA-537c-gmf6-5ccf. This is the library that encrypts stored Canvas and
+  # AI credentials, so the old <47 cap was holding back the fixes.
+  "cryptography>=50,<51",
   "keyring>=25,<26",
   "PyMuPDF>=1.24,<2",
   "python-docx>=1.1,<2",
