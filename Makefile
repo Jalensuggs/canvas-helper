@@ -60,13 +60,20 @@ check: lint test build docker-config
 desktop-sidecar: build
 	.venv/bin/python scripts/build_sidecar.py
 
+# The tauri CLI finds the project by looking for tauri.conf.json in a subfolder
+# of the working directory, so it runs from the repository root, not frontend/.
+# It still runs beforeDevCommand/beforeBuildCommand in the frontend directory.
+TAURI ?= ./frontend/node_modules/.bin/tauri
+
 desktop-dev: desktop-sidecar
-	cd frontend && npx tauri dev --config ../src-tauri/tauri.conf.json
+	$(TAURI) dev
 
 desktop-build: desktop-sidecar
-	cd frontend && npx tauri build --config ../src-tauri/tauri.conf.json
+	$(TAURI) build
 
-desktop-check:
+# cargo check needs the sidecar first: tauri.conf.json declares it as an
+# externalBin, and a missing one fails the build script.
+desktop-check: desktop-sidecar
 	cd src-tauri && cargo check
 
 docker-build:

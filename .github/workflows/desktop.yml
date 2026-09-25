@@ -73,5 +73,8 @@ jobs:
         working-directory: frontend
       - run: npm run desktop:sidecar
         working-directory: frontend
-      - run: npx tauri build --no-bundle --config ../src-tauri/tauri.conf.json
-        working-directory: frontend
+      # Run from the repository root: the tauri CLI locates the project by
+      # looking for tauri.conf.json in a subfolder of the working directory,
+      # and from frontend/ there is none. It still runs beforeBuildCommand in
+      # the frontend directory itself.
+      - run: ./frontend/node_modules/.bin/tauri build --no-bundle
