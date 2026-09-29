@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 import pytest
 from pydantic import ValidationError
 
+from canvas_helper import db
 from canvas_helper.config import Settings
 from canvas_helper.main import create_app
 
@@ -89,3 +90,66 @@ def test_production_server_configuration_accepts_complete_settings():
         smtp_password="secret",
     )
     assert settings.environment == "production"
+
+
+def test_migrations_are_found_when_installed_outside_a_checkout(tmp_path, monkeypatch):
+    """The server image installs the package into site-packages.
+
+    There the repository root two levels up is a shared library directory that
+    holds no migrations, so resolving them from it crashed every API container
+    on startup. The scripts ship as package data; check they are found there
+    with no checkout anywhere above.
+    """
+    site_packages = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
+    package = site_packages / "canvas_helper"
+    packaged_migrations = package / "migrations"
+    packaged_migrations.mkdir(parents=True)
+    (packaged_migrations / "env.py").write_text("")
+    monkeypatch.setattr(db, "__file__", str(package / "db.py"))
+    monkeypatch.chdir(tmp_path)
+
+    assert db._resolve_migrations_dir() == packaged_migrations
+
+
+def test_migrations_are_found_from_a_source_checkout():
+    """The repository layout keeps them at the root, two levels up."""
+    resolved = db._resolve_migrations_dir()
+
+    assert (resolved / "env.py").is_file()
+    assert (resolved / "versions").is_dir()
+
+
+def test_frontend_is_found_when_installed_outside_a_checkout(tmp_path, monkeypatch):
+    """The server image copies the built frontend next to the working directory.
+
+    The package itself is installed into site-packages, where the path two
+    levels up holds no frontend, so resolving from it served a 404 for every
+    page while the API itself looked healthy.
+    """
+    built = tmp_path / "frontend" / "dist"
+    built.mkdir(parents=True)
+    (built / "index.html").write_text("<div id=\"root\"></div>")
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(database_url="sqlite+aiosqlite:///:memory:", data_dir=tmp_path / "data")
+
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/", headers={"Accept": "text/html"}).status_code == 200
+
+
+def test_explicit_frontend_dir_still_wins(tmp_path, monkeypatch):
+    """An operator pointing the setting somewhere is never second-guessed."""
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    (chosen / "index.html").write_text("<main>chosen</main>")
+    decoy = tmp_path / "frontend" / "dist"
+    decoy.mkdir(parents=True)
+    (decoy / "index.html").write_text("<main>decoy</main>")
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(
+        database_url="sqlite+aiosqlite:///:memory:",
+        data_dir=tmp_path / "data",
+        frontend_dir=chosen,
+    )
+
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/", headers={"Accept": "text/html"}).text == "<main>chosen</main>"

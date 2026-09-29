@@ -73,18 +73,45 @@ async def init_db(engine: AsyncEngine) -> None:
             await session.commit()
 
 
+def _resolve_migrations_dir() -> Path:
+    """Locate the Alembic scripts directory for however this code is installed.
+
+    Three layouts have to work. A source checkout keeps ``migrations`` at the
+    repository root, two levels above this file. An installed wheel carries it
+    as package data beside the code, because ``parents[2]`` there is a site-
+    packages parent that holds no migrations at all. A PyInstaller bundle
+    unpacks it into ``_MEIPASS``. Probe each and take the first that really
+    holds ``env.py``, rather than trusting one layout and failing at startup.
+    """
+    candidates = []
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(getattr(sys, "_MEIPASS")) / "migrations")
+    here = Path(__file__).resolve()
+    candidates.append(here.parent / "migrations")
+    candidates.append(here.parents[2] / "migrations")
+    # Last resort: the working directory the container entrypoint runs from.
+    candidates.append(Path.cwd() / "migrations")
+    for candidate in candidates:
+        if (candidate / "env.py").is_file():
+            return candidate
+    raise RuntimeError(
+        "Could not locate the Alembic migrations directory. Looked in: "
+        + ", ".join(str(candidate) for candidate in candidates)
+    )
+
+
 async def migrate_database(database_url: str) -> None:
     """Upgrade a persistent database to the current Alembic revision."""
     if database_url.endswith("/:memory:") or database_url.endswith(":///:memory:"):
         # Alembic opens a separate connection, which is a separate SQLite memory DB.
         return
-    root = (
-        Path(getattr(sys, "_MEIPASS"))
-        if getattr(sys, "frozen", False)
-        else Path(__file__).resolve().parents[2]
-    )
-    config = Config(str(root / "alembic.ini"))
-    config.set_main_option("script_location", str(root / "migrations"))
+    scripts = _resolve_migrations_dir()
+    # The ini only supplies logging config here; every option Alembic needs is
+    # set below. It sits next to the scripts in a checkout but is not shipped
+    # as package data, so a missing one is normal and Config(None) is correct.
+    ini_path = scripts.parent / "alembic.ini"
+    config = Config(str(ini_path) if ini_path.is_file() else None)
+    config.set_main_option("script_location", str(scripts))
     config.set_main_option("sqlalchemy.url", sync_database_url(database_url))
     # The process running this already configured its own logging; env.py must
     # not replace it. See the note there.
