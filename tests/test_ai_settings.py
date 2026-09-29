@@ -201,9 +201,8 @@ def test_deepseek_can_be_saved_and_replaces_another_providers_key(tmp_path):
 
 def test_deepseek_talks_to_its_own_endpoint_through_the_openai_client(monkeypatch):
     import asyncio
-    from types import SimpleNamespace
-
-    import openai
+    import sys
+    from types import ModuleType, SimpleNamespace
 
     from canvas_helper.ai import AIService
 
@@ -228,7 +227,11 @@ def test_deepseek_talks_to_its_own_endpoint_through_the_openai_client(monkeypatc
                 usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2),
             )
 
-    monkeypatch.setattr(openai, "AsyncOpenAI", FakeClient)
+    # CI does not install the optional 'ai' extra, so stand in for the package
+    # instead of patching it: the test is about which endpoint gets used.
+    fake_openai = ModuleType("openai")
+    fake_openai.AsyncOpenAI = FakeClient
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
     service = AIService("sk-deepseek-key-5678", "some-model", "deepseek")
     assert service.available
     result = asyncio.run(service.chat([{"role": "user", "content": "hello"}]))
