@@ -1,26 +1,13 @@
 # 上线部署清单
 
-从代码到一个同学能访问的站点。总成本 0 元/月。
+从代码到一个同学能访问的站点。服务器约 ¥25–35/月，其余全部免费。
 
 本文只写**线上模式**。只给自己用的话走 [local-development.md](local-development.md)，不需要服务器、
 域名和 SMTP，也不用看这篇。
 
-> 各家免费额度变动很快。本文的数字是 2026-09-29 核对过的，下单前请以官网当时的条款为准。
-
----
-
-## 0. 前置：先合并部署修复
-
-**这一步不能跳。** `main` 当前的代码在容器里起不来。
-
-两处路径都用 `Path(__file__).resolve().parents[2]` 定位资源。源码检出时这是仓库根目录，
-所以本地开发一切正常；但镜像把包装进 site-packages 后，这个路径变成
-`/opt/venv/lib/python3.12`，既没有 `migrations/` 也没有 `frontend/dist`：
-
-- **迁移**：API 容器启动时崩溃，陷入重启循环，worker 等不到健康检查也起不来
-- **前端**：`/health` 和整个 `/api` 都正常，但每个页面返回 404——看起来像反代配错了，很难查
-
-修复在 `claude/lucid-brahmagupta-8cjn4e` 分支。**先把 PR 合进 `main` 再往下走。**
+> 本文的免费额度和限制是 2026-09-29 核对过的。**服务器价格是第三方渠道的报价，未经阿里云
+> 官方定价页核实**——中文 VPS 内容返利含量很高，同一套餐常见互相矛盾的配置说明。下单前一律
+> 以购买页显示的配置和续费价为准。
 
 ---
 
@@ -28,53 +15,73 @@
 
 | | 用什么 | 成本 |
 | --- | --- | --- |
-| 服务器 | Oracle Cloud Always Free（ARM） | 0 |
+| 服务器 | 阿里云轻量应用服务器 · **中国香港** | ~¥25–35/月 |
 | 域名 | GitHub 学生包的 Namecheap 免费域名 | 0（首年） |
 | HTTPS | Caddy 自动申请 Let's Encrypt | 0 |
 | SMTP | Brevo 免费档 | 0 |
 
 PostgreSQL 在 compose 里自带，不用另外买。
 
-**注意**：DigitalOcean 已于 2026-08-01 退出 GitHub 学生包，$200 额度全部作废。
-学生包里现在没有适合跑 7×24 服务的托管额度（Azure 的 $100 是有限额度；Heroku 文件系统
-是临时的，存不住课件；CamberCloud 每月 40 CPU 小时不够常驻），所以服务器走 Oracle。
+### 为什么是香港节点
+
+**境内节点必须 ICP 备案，这是硬阻塞。** 备案不区分端口——以为换成 8080 就能绕过去是常见
+误解，只要域名解析指向中国内地服务器就得备案，未备案不允许开通访问。备案需要大陆实体或
+身份，周期以周计。而且学生包那个 `.me` 域名还要求注册商有资质（阿里云、新网），Namecheap
+注册的得先转入，学生免费域名通常还有 60 天转移锁。
+
+香港节点不在备案范围内，域名解析过去直接可用。香港到悉尼约 130ms，比本地节点慢但完全够用；
+如果有同学在国内，香港的体验反而比悉尼好。
+
+### 为什么不是那些免费方案
+
+- **Oracle Always Free** 是唯一真正永久免费且够用的，但注册审核经常过不了（多卡在信用卡
+  验证或区域风控）。能开出来的话它更优：悉尼节点、2 OCPU / 12 GB、0 元
+- **GitHub 学生包**里没有适合跑 7×24 服务的托管额度了。DigitalOcean 已于 2026-08-01 退出
+  学生包且额度全部作废；Azure 的 $100 是有限额度，2GB 机型约 3 个月烧完；Heroku 文件系统
+  是临时的，存不住课件；CamberCloud 每月 40 CPU 小时不够常驻
+- **GCP / AWS 免费档**只有 1GB 内存，跑不动 api + worker + Postgres 三个容器
+
+学生包在这套方案里贡献的是**域名**，不是服务器。
 
 ---
 
-## 2. 开服务器（Oracle Always Free）
+## 2. 开服务器（阿里云轻量应用服务器）
 
-1. 注册 <https://cloud.oracle.com/>，选 Always Free。信用卡只做实名验证，不扣费。
-   注册完**确认账号类型是 Always Free 而不是 Pay As You Go**
-2. **区域选 Sydney**：延迟低（Canvas 本身在 `canvas.uts.edu.au`），而且 APAC 区的 ARM
-   容量明显比美国区好开
-3. Compute → Create Instance：
-   - Shape：`VM.Standard.A1.Flex`
-   - 规格：**2 OCPU / 12 GB**（Oracle 在 2026 年把免费额度砍半了，这是现在的上限）
-   - 镜像：Ubuntu 24.04
-   - **SSH 私钥当场下载保存**，只有这一次机会
-4. 网络 → VCN → Security List：加 **80** 和 **443** 的入站规则
-5. 抢不到容量就换可用域重试，或过几小时再试。**别为此升级成 Pay As You Go**
+阿里云控制台 → 轻量应用服务器 → 创建。
 
-### ARM 兼容性（已核对）
+**地域选「中国香港」**——这一项决定了要不要备案，选错了后面全白做。
 
-Oracle 免费的是 ARM 机器。已逐个核对 `requirements.lock` 里 58 个依赖：
+配置上只有两个数字需要认真对待：
 
-- 42 个纯 Python 包（与架构无关）
-- 16 个有 linux aarch64 wheel（含 PyMuPDF、cryptography、pydantic_core、lxml、pillow）
-- **0 个需要源码编译**
+- **内存 ≥ 2GB**。便宜套餐里有不少是 0.5G 或 1G，那些跑不起来：三个容器加上构建镜像会直接
+  OOM。别只看月费，先看内存
+- **系统盘 ≥ 40GB**。课件下载下来要占空间，20G 偏紧
 
-三个基础镜像 `python:3.12-slim-bookworm`、`node:22-bookworm-slim`、`postgres:17-alpine`
-都有 arm64 变体。ARM 上构建不会因为缺 wheel 而变慢或失败。
+镜像选**系统镜像 → Ubuntu 24.04**，不要选应用镜像（那些预装了用不上的面板）。
 
-> 说明：这份清单是在 x86 上验证的部署链路 + 对 ARM 依赖可用性的核对，
-> 不是在 ARM 机器上的实测。
+创建完还有两件事：
+
+1. **防火墙**：轻量控制台的防火墙里放行 **80** 和 **443**。默认只开了 22
+2. **登录方式**：默认是密码登录，建议在控制台绑定密钥对，然后关掉密码登录
+
+> **下单前看一眼续费价格。** 阿里云的惯例是首年促销价低、续费回原价，购买页会显示续费价，
+> 差距可能不小。另外轻量**升配容易、降配基本不行**，别买了大的指望以后降。
+
+### 架构说明
+
+轻量是 x86_64 机器，和本文验证部署链路时用的架构一致，依赖不会有兼容性问题。
+
+> 如果你以后换到 Oracle 的 ARM 机器：`requirements.lock` 里 58 个依赖已逐个核对过，
+> 42 个纯 Python、16 个有 linux aarch64 wheel（含 PyMuPDF、cryptography、pydantic_core、
+> lxml、pillow），0 个需要源码编译；三个基础镜像也都有 arm64 变体。ARM 上不会因为缺 wheel
+> 而构建失败。
 
 ---
 
 ## 3. 装 Docker
 
 ```bash
-ssh ubuntu@<你的服务器IP>
+ssh root@<你的服务器公网IP>      # 阿里云 Ubuntu 镜像默认用户是 root
 
 sudo apt-get update && sudo apt-get install -y ca-certificates curl
 curl -fsSL https://get.docker.com | sudo sh
@@ -83,12 +90,35 @@ exec su -l $USER          # 重新登录让用户组生效
 docker --version
 ```
 
-Ubuntu 镜像自带一层 iptables，**不放行的话安全组开了也通不了**：
+### 加 swap（2GB 内存必做）
+
+构建镜像要编译前端再装整个 Python 依赖集，2GB 内存跑这一步很容易 OOM。先加 2GB swap：
 
 ```bash
-sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
-sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
-sudo netfilter-persistent save
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+free -h          # 确认 Swap 那行不是 0
+```
+
+写进 `/etc/fstab` 是为了重启后仍然生效，别省这一步。
+
+### 确认端口通了
+
+阿里云的放行在**控制台防火墙**里做（第 2 节那步），系统镜像默认不额外带主机防火墙。
+如果配好 Caddy 后外网仍然打不开，回头查一下主机这层：
+
+```bash
+sudo iptables -L INPUT -n | head     # 有没有 DROP/REJECT 规则
+sudo ufw status                      # 装了 ufw 的话是否 active
+```
+
+ufw 是 active 的话放行：
+
+```bash
+sudo ufw allow 80/tcp && sudo ufw allow 443/tcp
 ```
 
 ---
@@ -101,7 +131,10 @@ Name.com 和 `.tech` 也各有一个，都能用。
 > Namecheap 这项有地区限制，只对美/英/加/澳的学校开放。UTS 在澳洲，符合条件。
 > 以你自己 Student Pack 面板里显示的为准。
 
-拿到域名后加一条 A 记录指向服务器公网 IP。用 Cloudflare 的免费 DNS 托管也行。
+拿到域名后加一条 A 记录指向轻量实例的公网 IP。用 Cloudflare 的免费 DNS 托管也行。
+
+> **免备案的前提是解析指向香港 IP。** 哪天你把这个域名指回境内节点，备案义务立刻回来，
+> 站点会被挡掉。换服务器时记着这条。
 
 不想用学生包的话，[DuckDNS](https://www.duckdns.org/) 的免费子域名一样能跑，
 Caddy 申请证书没区别。
@@ -263,7 +296,8 @@ docker compose logs api | grep -i "delivery failed"
 - [ ] 5432 和 8000 **没有**暴露到公网（compose 默认只绑 127.0.0.1）
 - [ ] HTTPS 证书正常，`CANVAS_HELPER_PUBLIC_URL` 和浏览器地址完全一致
 - [ ] `.env` 没有被提交进 Git（`.gitignore` 里已排除）
-- [ ] SSH 用密钥登录，关掉密码登录
+- [ ] SSH 用密钥登录，关掉密码登录（轻量默认开密码登录，这条别跳过）
+- [ ] 轻量控制台防火墙只放行了 22 / 80 / 443，没有多余端口
 
 登录接口默认已限流：每邮箱每小时 5 封、每 IP 每小时 20 封，
 可用 `CANVAS_HELPER_MAGIC_LINK_PER_EMAIL_PER_HOUR` 和
