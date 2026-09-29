@@ -4,6 +4,13 @@
 
 可以自己本机用，也可以部署成网站：别人注册后填入自己的 Canvas API Token 即可使用。
 
+## 线上实例
+
+<https://canvas-myles.me>
+
+UTS 学生用学校邮箱即可注册。注册邮箱域名设了白名单，其他域名会被拒绝——这是部署方
+自己配的，不是项目限制。想给别的学校用，自己部署一份，见[上线给别人用](#上线给别人用)。
+
 ## 功能
 
 - 本学期课程、作业、日历待办和教师/Tutor 公告
@@ -220,4 +227,9 @@ make check          # ruff + pytest + 前端类型检查/测试 + 前端构建 +
 - [备份与升级](docs/backup-upgrade.md)
 - [贡献](CONTRIBUTING.md)
 
-MIT License。
+## 许可
+
+[MIT License](LICENSE)，Copyright (c) 2026 Canvas Helper contributors。
+
+可以自由使用、修改、分发和商用，唯一要求是在副本中保留版权声明和许可声明。
+本项目按「现状」提供，不含任何担保。
