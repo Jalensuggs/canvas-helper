@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 
 from .actions import ActionError, ActionService
-from .ai import AIService, AIUnavailable, sse_event
+from .ai import AI_PROVIDERS, AIService, AIUnavailable, sse_event
 from .auth import AuthService
 from .canvas.client import CanvasClient
 from .canvas.pool import CanvasClientPool
@@ -87,7 +87,7 @@ class MagicLinkVerify(BaseModel):
 
 
 class AISettingsInput(BaseModel):
-    provider: str = Field(default="anthropic", pattern="^(anthropic|openai)$")
+    provider: str = Field(default="anthropic", pattern="^(anthropic|openai|deepseek)$")
     api_key: str = Field(min_length=8, max_length=4096)
     model: str = Field(min_length=1, max_length=200)
 
@@ -1798,9 +1798,11 @@ def create_app(
         )
         # One provider is active at a time. A key left behind for the other one
         # would sit in the vault where the user can neither see nor remove it.
-        other = "openai" if body.provider == "anthropic" else "anthropic"
-        await request.app.state.credentials.delete(session, user.id, f"{other}_api_key")
-        await request.app.state.credentials.delete(session, user.id, f"{other}_model")
+        for other in AI_PROVIDERS:
+            if other == body.provider:
+                continue
+            await request.app.state.credentials.delete(session, user.id, f"{other}_api_key")
+            await request.app.state.credentials.delete(session, user.id, f"{other}_model")
         return {"configured": True, "provider": body.provider, "model": body.model}
 
     @app.get("/api/settings/ai")
@@ -1832,7 +1834,7 @@ def create_app(
     ) -> Response:
         vault = request.app.state.credentials
         provider = await vault.get(session, user.id, "ai_provider")
-        for provider_name in ({provider} if provider else {"anthropic", "openai"}):
+        for provider_name in ((provider,) if provider else AI_PROVIDERS):
             await vault.delete(session, user.id, f"{provider_name}_api_key")
             await vault.delete(session, user.id, f"{provider_name}_model")
         await vault.delete(session, user.id, "ai_provider")

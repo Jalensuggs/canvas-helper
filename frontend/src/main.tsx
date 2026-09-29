@@ -1194,6 +1194,7 @@ function AIPage() {
 const AI_PROVIDERS = [
   { value: "anthropic", label: "Anthropic（Claude）" },
   { value: "openai", label: "OpenAI" },
+  { value: "deepseek", label: "DeepSeek" },
 ] as const;
 
 /**
@@ -1229,7 +1230,7 @@ export function AiKeyCard() {
         <div className="connection-card">
           <span className="avatar large"><Bot size={20} /></span>
           <span className="grow">
-            <strong>{text(current.data?.provider) === "openai" ? "OpenAI" : "Anthropic（Claude）"}</strong>
+            <strong>{AI_PROVIDERS.find((item) => item.value === current.data?.provider)?.label ?? text(current.data?.provider)}</strong>
             <small>{text(current.data?.model)} · {text(current.data?.key_hint)}</small>
           </span>
           <span className="status-badge success"><Check size={14} />已配置</span>
@@ -1319,7 +1320,7 @@ function SettingsPage({ me }: { me: JsonObject }) {
     <div className="settings-grid">
       <div className="stack-lg">
         <section className="card settings-section">
-          <CardHeader title="Canvas 连接" subtitle="凭证保存在本机安全存储中" />
+          <CardHeader title="Canvas 连接" subtitle="访问令牌加密保存，页面不会再显示" />
           <div className="connection-card">
             <span className="avatar large">{displayName(me, "学").slice(0, 1)}</span>
             <span className="grow"><strong>{displayName(me, "Canvas 用户")}</strong><small>{text(me.canvas_url ?? me.domain, "Canvas 已连接")}</small></span>

@@ -163,3 +163,80 @@ def test_switching_provider_does_not_leave_the_old_key_behind(tmp_path):
         names = {row[0] for row in connection.execute("SELECT name FROM encrypted_credentials")}
     assert "anthropic_api_key" not in names
     assert "anthropic_model" not in names
+
+
+def test_deepseek_can_be_saved_and_replaces_another_providers_key(tmp_path):
+    import sqlite3
+
+    _, client = signed_in(tmp_path)
+    try:
+        headers = csrf_headers(client)
+        client.put(
+            "/api/settings/ai",
+            json={"provider": "openai", "api_key": KEY, "model": "m1"},
+            headers=headers,
+        )
+        saved = client.put(
+            "/api/settings/ai",
+            json={"provider": "deepseek", "api_key": "sk-deepseek-key-5678", "model": "m2"},
+            headers=headers,
+        )
+        assert saved.status_code == 200
+        body = client.get("/api/settings/ai").json()
+        assert body["provider"] == "deepseek"
+        assert body["key_hint"] == "…5678"
+        assert client.put(
+            "/api/settings/ai",
+            json={"provider": "nonsense", "api_key": KEY, "model": "m"},
+            headers=headers,
+        ).status_code == 422
+        assert client.delete("/api/settings/ai", headers=headers).status_code == 204
+    finally:
+        client.__exit__(None, None, None)
+
+    with sqlite3.connect(tmp_path / "server.db") as connection:
+        names = {row[0] for row in connection.execute("SELECT name FROM encrypted_credentials")}
+    assert not {n for n in names if n.startswith(("openai", "deepseek", "ai_provider"))}
+
+
+def test_deepseek_talks_to_its_own_endpoint_through_the_openai_client(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    import openai
+
+    from canvas_helper.ai import AIService
+
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def _create(self, **kwargs):
+            seen["model"] = kwargs["model"]
+            return SimpleNamespace(
+                model=kwargs["model"],
+                choices=[SimpleNamespace(message=SimpleNamespace(content="hi"))],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2),
+            )
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", FakeClient)
+    service = AIService("sk-deepseek-key-5678", "some-model", "deepseek")
+    assert service.available
+    result = asyncio.run(service.chat([{"role": "user", "content": "hello"}]))
+    assert result["text"] == "hi"
+    assert seen["base_url"] == "https://api.deepseek.com"
+    assert seen["api_key"] == "sk-deepseek-key-5678"
+
+    # OpenAI itself must keep using its default endpoint.
+    seen.clear()
+    asyncio.run(AIService("sk-proj-abcdefgh", "m", "openai").chat([{"role": "user", "content": "hello"}]))
+    assert seen["base_url"] is None

@@ -61,7 +61,15 @@ class AnthropicProvider:
         )
 
 
+# Providers a user can bring a key for. DeepSeek speaks the OpenAI wire format,
+# so it reuses that client pointed at DeepSeek's own endpoint.
+AI_PROVIDERS = ("anthropic", "openai", "deepseek")
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+
 class OpenAIProvider:
+    base_url: str | None = None
+
     def __init__(self, api_key: str, model: str, timeout: float = DEFAULT_TIMEOUT_SECONDS):
         self.api_key, self.model, self.timeout = api_key, model, timeout
 
@@ -72,7 +80,9 @@ class OpenAIProvider:
             from openai import AsyncOpenAI
         except ImportError as exc:
             raise AIUnavailable("Install the optional 'ai' dependency") from exc
-        async with AsyncOpenAI(api_key=self.api_key, timeout=self.timeout) as client:
+        async with AsyncOpenAI(
+            api_key=self.api_key, base_url=self.base_url, timeout=self.timeout
+        ) as client:
             response = await client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "system", "content": system}, *messages],
@@ -86,6 +96,10 @@ class OpenAIProvider:
                 "output_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
             },
         )
+
+
+class DeepSeekProvider(OpenAIProvider):
+    base_url = DEEPSEEK_BASE_URL
 
 
 SYSTEM_PROMPT = """You are a Canvas study assistant.
@@ -136,7 +150,7 @@ class AIService:
         try:
             if self.provider_name == "anthropic":
                 import anthropic  # noqa: F401
-            elif self.provider_name == "openai":
+            elif self.provider_name in ("openai", "deepseek"):
                 import openai  # noqa: F401
             else:
                 return False
@@ -155,6 +169,8 @@ class AIService:
             return AnthropicProvider(self.api_key, self.model, self.timeout)
         if self.provider_name == "openai":
             return OpenAIProvider(self.api_key, self.model, self.timeout)
+        if self.provider_name == "deepseek":
+            return DeepSeekProvider(self.api_key, self.model, self.timeout)
         raise AIUnavailable("Unsupported AI provider")
 
     async def chat(

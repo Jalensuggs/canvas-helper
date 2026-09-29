@@ -121,3 +121,17 @@ test("removing asks the server to forget the key", async () => {
 
   expect(removeAiSettings).toHaveBeenCalledTimes(1);
 });
+
+test("DeepSeek is offered and a saved DeepSeek key is labelled as such", async () => {
+  aiSettings.mockResolvedValue({
+    configured: true,
+    provider: "deepseek",
+    model: "some-model",
+    key_hint: "…5678",
+  });
+  await mount();
+
+  const options = Array.from(container.querySelectorAll("option")).map((option) => option.value);
+  expect(options).toContain("deepseek");
+  expect(container.querySelector(".connection-card strong")?.textContent).toBe("DeepSeek");
+});

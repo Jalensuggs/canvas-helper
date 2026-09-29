@@ -23,6 +23,7 @@ _SECRET_KEYS = {
     "api_key",
     "anthropic_api_key",
     "openai_api_key",
+    "deepseek_api_key",
     "verifier",
     "sf_verifier",
     "ics_key",
