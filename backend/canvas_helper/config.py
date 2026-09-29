@@ -101,6 +101,8 @@ class Settings(BaseSettings):
     anthropic_model: str | None = None
     openai_api_key: str | None = None
     openai_model: str | None = None
+    deepseek_api_key: str | None = None
+    deepseek_model: str | None = None
     ai_request_timeout_seconds: float = 60.0
     smtp_timeout_seconds: float = 15.0
     sync_wait_max_seconds: float = 30.0
