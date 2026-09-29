@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import EncryptedCredential, LOCAL_USER_ID
@@ -115,4 +115,19 @@ class CredentialVault:
             row.nonce = nonce
             row.key_version = self.key_version
             row.updated_at = now
+        await session.commit()
+
+    async def delete(self, session: AsyncSession, user_id: str, name: str) -> None:
+        """Remove a credential; removing one that is not there is not an error."""
+        if self.mode == "local_desktop":
+            self.desktop_store.delete(self._desktop_name(user_id, name))
+            if user_id == LOCAL_USER_ID:
+                self.desktop_store.delete(name)
+            return
+        await session.execute(
+            delete(EncryptedCredential).where(
+                EncryptedCredential.user_id == user_id,
+                EncryptedCredential.name == name,
+            )
+        )
         await session.commit()

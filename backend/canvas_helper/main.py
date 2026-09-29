@@ -1796,7 +1796,47 @@ def create_app(
         await request.app.state.credentials.set(
             session, user.id, "ai_provider", body.provider
         )
+        # One provider is active at a time. A key left behind for the other one
+        # would sit in the vault where the user can neither see nor remove it.
+        other = "openai" if body.provider == "anthropic" else "anthropic"
+        await request.app.state.credentials.delete(session, user.id, f"{other}_api_key")
+        await request.app.state.credentials.delete(session, user.id, f"{other}_model")
         return {"configured": True, "provider": body.provider, "model": body.model}
+
+    @app.get("/api/settings/ai")
+    async def get_ai_settings(
+        request: Request,
+        user: CurrentUser,
+        session: AsyncSession = Depends(session_dependency),
+    ) -> dict[str, Any]:
+        """Report whether a key is saved. The key itself never leaves the server."""
+        vault = request.app.state.credentials
+        provider = await vault.get(session, user.id, "ai_provider")
+        api_key = await vault.get(session, user.id, f"{provider}_api_key") if provider else None
+        if not provider or not api_key:
+            return {"configured": False}
+        return {
+            "configured": True,
+            "provider": provider,
+            "model": await vault.get(session, user.id, f"{provider}_model"),
+            # Enough to tell two saved keys apart at a glance, not enough to
+            # be worth reading off a screenshot or a log.
+            "key_hint": "…" + api_key[-4:],
+        }
+
+    @app.delete("/api/settings/ai", status_code=204)
+    async def delete_ai_settings(
+        request: Request,
+        user: CurrentUser,
+        session: AsyncSession = Depends(session_dependency),
+    ) -> Response:
+        vault = request.app.state.credentials
+        provider = await vault.get(session, user.id, "ai_provider")
+        for provider_name in ({provider} if provider else {"anthropic", "openai"}):
+            await vault.delete(session, user.id, f"{provider_name}_api_key")
+            await vault.delete(session, user.id, f"{provider_name}_model")
+        await vault.delete(session, user.id, "ai_provider")
+        return Response(status_code=204)
 
     @app.post("/api/ai/chat")
     async def ai_chat(
