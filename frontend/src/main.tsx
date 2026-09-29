@@ -206,7 +206,7 @@ function SetupPage({ onReady }: { onReady: () => void }) {
   );
 }
 
-function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
+export function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
   const [email, setEmail] = useState("");
   const requestLink = useMutation({ mutationFn: () => api.requestMagicLink(email) });
   const token = new URLSearchParams(window.location.search).get("magic_token");
@@ -217,12 +217,6 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
       onAuthenticated();
     },
   });
-  useEffect(() => {
-    if (token && !verify.isPending && !verify.isSuccess && !verify.isError) {
-      verify.mutate(token);
-    }
-  }, [token]); // The token is consumed only once by the server.
-
   return (
     <main className="setup-shell">
       <section className="setup-visual">
@@ -231,9 +225,27 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
       </section>
       <section className="setup-panel">
         <div className="setup-form-wrap">
-          <h2>{token ? "正在验证登录链接" : "通过邮箱登录"}</h2>
+          <h2>{token ? "确认登录" : "通过邮箱登录"}</h2>
           {token ? (
-            verify.isError ? <InlineError error={verify.error} /> : <FullLoader label="正在安全登录" />
+            // Verifying on page load spends the link before its owner sees it.
+            // Microsoft 365 Safe Links opens every URL it delivers in a sandbox
+            // that runs the page's JavaScript, so it claimed the one-time token
+            // and the student arrived to "invalid or expired". A scanner loads
+            // and renders; it does not press buttons, so the click is what
+            // separates the two.
+            <div className="form-stack">
+              {verify.isError && <InlineError error={verify.error} />}
+              {verify.isPending ? (
+                <FullLoader label="正在安全登录" />
+              ) : (
+                <>
+                  <p className="muted">点击下面的按钮完成登录。</p>
+                  <button className="button primary wide" onClick={() => verify.mutate(token)}>
+                    确认登录
+                  </button>
+                </>
+              )}
+            </div>
           ) : (
             <form className="form-stack" onSubmit={(event) => { event.preventDefault(); requestLink.mutate(); }}>
               <label><span>邮箱</span><input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label>
@@ -1314,11 +1326,16 @@ function DesktopLifecycle() {
   return null;
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <DesktopLifecycle />
-      <BrowserRouter><App /></BrowserRouter>
-    </QueryClientProvider>
-  </React.StrictMode>,
-);
+// Guarded so the module can be imported without a document to mount into,
+// which is how the login test drives LoginPage directly.
+const rootElement = document.getElementById("root");
+if (rootElement) {
+  ReactDOM.createRoot(rootElement).render(
+    <React.StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <DesktopLifecycle />
+        <BrowserRouter><App /></BrowserRouter>
+      </QueryClientProvider>
+    </React.StrictMode>,
+  );
+}
