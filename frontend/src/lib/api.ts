@@ -90,6 +90,13 @@ export const api = {
     }),
   logout: () => request<void>("/api/auth/logout", { method: "POST", body: "{}" }),
   me: () => request<JsonObject>("/api/me"),
+  aiSettings: () => request<JsonObject>("/api/settings/ai"),
+  saveAiSettings: (provider: string, apiKey: string, model: string) =>
+    request<JsonObject>("/api/settings/ai", {
+      method: "PUT",
+      body: JSON.stringify({ provider, api_key: apiKey, model }),
+    }),
+  removeAiSettings: () => request<void>("/api/settings/ai", { method: "DELETE" }),
   setupToken: (canvasUrl: string, token: string) =>
     request<JsonObject>("/api/setup/token", {
       method: "POST",

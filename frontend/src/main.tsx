@@ -1191,6 +1191,98 @@ function AIPage() {
   );
 }
 
+const AI_PROVIDERS = [
+  { value: "anthropic", label: "Anthropic（Claude）" },
+  { value: "openai", label: "OpenAI" },
+] as const;
+
+/**
+ * The user's own AI key. It is write-only: the server confirms a key exists and
+ * returns a four-character hint, never the key, so the only copy this page ever
+ * holds is what was just typed — cleared the moment it is saved.
+ */
+export function AiKeyCard() {
+  const queryClient = useQueryClient();
+  const current = useQuery({ queryKey: ["ai-settings"], queryFn: api.aiSettings });
+  const [provider, setProvider] = useState<string>("anthropic");
+  const [model, setModel] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const save = useMutation({
+    mutationFn: () => api.saveAiSettings(provider, apiKey.trim(), model.trim()),
+    onSuccess: () => {
+      setApiKey("");
+      setModel("");
+      return queryClient.invalidateQueries({ queryKey: ["ai-settings"] });
+    },
+  });
+  const remove = useMutation({
+    mutationFn: () => api.removeAiSettings(),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ai-settings"] }),
+  });
+  const saved = current.data?.configured === true;
+  const canSave = apiKey.trim().length >= 8 && model.trim().length > 0 && !save.isPending;
+
+  return (
+    <section className="card settings-section">
+      <CardHeader title="AI 密钥" subtitle="用你自己的 Key 使用 AI 工作区，费用记在你的账户上" />
+      {saved && (
+        <div className="connection-card">
+          <span className="avatar large"><Bot size={20} /></span>
+          <span className="grow">
+            <strong>{text(current.data?.provider) === "openai" ? "OpenAI" : "Anthropic（Claude）"}</strong>
+            <small>{text(current.data?.model)} · {text(current.data?.key_hint)}</small>
+          </span>
+          <span className="status-badge success"><Check size={14} />已配置</span>
+          <button className="button soft small" onClick={() => remove.mutate()} disabled={remove.isPending}>
+            移除
+          </button>
+        </div>
+      )}
+      {remove.isError && <InlineError error={remove.error} />}
+      <form
+        className="form-stack"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (canSave) save.mutate();
+        }}
+      >
+        <label>
+          <span>服务商</span>
+          <select value={provider} onChange={(event) => setProvider(event.target.value)}>
+            {AI_PROVIDERS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+          </select>
+        </label>
+        <label>
+          <span>模型</span>
+          <input
+            value={model}
+            onChange={(event) => setModel(event.target.value)}
+            placeholder="填你账号能用的模型名，如服务商文档里列出的"
+          />
+        </label>
+        <label>
+          <span>API Key</span>
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={apiKey}
+            onChange={(event) => setApiKey(event.target.value)}
+            placeholder={saved ? "留空不动；填新的会替换现有 Key" : "粘贴 Key"}
+          />
+        </label>
+        {save.isError && <InlineError error={save.error} />}
+        <button className="button primary wide" disabled={!canSave}>
+          {save.isPending ? "正在保存…" : saved ? "保存并替换" : "保存"}
+        </button>
+      </form>
+      <p className="fine-print">
+        Key 在服务器上加密保存，保存后页面不会再显示，只留末四位方便你认出是哪一个。
+        想撤销可以点「移除」，也可以直接去服务商后台删除这个 Key。
+      </p>
+    </section>
+  );
+}
+
 function SettingsPage({ me }: { me: JsonObject }) {
   const queryClient = useQueryClient();
   const status = useQuery({ queryKey: ["sync-status"], queryFn: api.syncStatus });
@@ -1235,6 +1327,7 @@ function SettingsPage({ me }: { me: JsonObject }) {
           </div>
           <div className="token-row"><span><strong>访问令牌</strong><small>出于安全原因不会显示已保存内容</small></span><code>••••••••••••••••</code></div>
         </section>
+        <AiKeyCard />
         <section className="card settings-section">
           <CardHeader title="同步" subtitle={status.data?.last_sync_at ? `数据更新于 ${formatDate(status.data.last_sync_at)}` : "保持课程数据最新"} action={<button className="button primary small" onClick={() => sync.mutate()} disabled={isSyncing}><RefreshCw className={isSyncing ? "spin" : ""} size={16} />{isSyncing ? "同步中" : "立即同步"}</button>} />
           {sync.isError && <InlineError error={sync.error} />}
