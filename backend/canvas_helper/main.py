@@ -345,6 +345,32 @@ def visible_material_conditions() -> tuple[Any, ...]:
     )
 
 
+def _resolve_frontend_dir(settings: Settings) -> Path:
+    """Locate the built frontend for however this code is installed.
+
+    An explicit setting always wins. Otherwise the layouts differ: a source
+    checkout builds into ``frontend/dist`` at the repository root, a frozen
+    desktop bundle unpacks it into ``_MEIPASS``, and the server image copies it
+    next to the working directory while the package itself lives in site-
+    packages — where the repository root two levels up holds no frontend at
+    all. Resolving from that one layout served a 404 for every page in the
+    container. Probe each and take the first that really has an ``index.html``;
+    falling back to the checkout path keeps the "not built yet" 404 unchanged.
+    """
+    if settings.frontend_dir is not None:
+        return settings.frontend_dir.expanduser().resolve()
+    candidates = []
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(getattr(sys, "_MEIPASS")) / "frontend" / "dist")
+    checkout = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    candidates.append(checkout)
+    candidates.append(Path.cwd() / "frontend" / "dist")
+    for candidate in candidates:
+        if (candidate / "index.html").is_file():
+            return candidate.resolve()
+    return checkout.resolve()
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -485,17 +511,7 @@ def create_app(
         await session.commit()
         await sync_queue.ensure_schedules(user.id)
 
-    if settings.frontend_dir is not None:
-        frontend_dir = settings.frontend_dir.expanduser().resolve()
-    elif getattr(sys, "frozen", False):
-        frontend_dir = (
-            Path(getattr(sys, "_MEIPASS")) / "frontend" / "dist"
-        ).resolve()
-    else:
-        frontend_dir = (
-            Path(__file__).resolve().parents[2] / "frontend" / "dist"
-        ).resolve()
-    app.state.frontend_dir = frontend_dir
+    app.state.frontend_dir = _resolve_frontend_dir(settings)
 
     async def canvas_for(
         request: Request, user: User, session: AsyncSession

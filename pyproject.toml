@@ -57,6 +57,12 @@ desktop = ["pyinstaller>=6.11,<7"]
 [tool.hatch.build.targets.wheel]
 packages = ["backend/canvas_helper"]
 
+# The app runs Alembic itself on startup, so the scripts have to travel with
+# the installed package: outside a source checkout there is no repository root
+# to find them in.
+[tool.hatch.build.targets.wheel.force-include]
+"migrations" = "canvas_helper/migrations"
+
 [tool.pytest.ini_options]
 pythonpath = ["backend"]
 asyncio_mode = "auto"

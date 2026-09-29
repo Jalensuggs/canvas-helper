@@ -22,6 +22,9 @@ COPY migrations/ migrations/
 RUN pip install --no-cache-dir -r requirements.lock \
     && pip install --no-cache-dir --no-deps ".[ai]"
 COPY --from=frontend /build/frontend/dist frontend/dist
+# Point the app at the built frontend explicitly, so serving it does not
+# depend on the working directory the container happens to start in.
+ENV CANVAS_HELPER_FRONTEND_DIR=/app/frontend/dist
 COPY docker/entrypoint.sh /usr/local/bin/canvas-helper-entrypoint
 RUN chmod 0555 /usr/local/bin/canvas-helper-entrypoint \
     && mkdir -p /data \
