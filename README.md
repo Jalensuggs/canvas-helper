@@ -4,6 +4,13 @@
 
 可以自己本机用，也可以部署成网站：别人注册后填入自己的 Canvas API Token 即可使用。
 
+## 线上实例
+
+<https://canvas-myles.me>
+
+UTS 学生用学校邮箱即可注册。注册邮箱域名设了白名单，其他域名会被拒绝——这是部署方
+自己配的，不是项目限制。想给别的学校用，自己部署一份，见[上线给别人用](#上线给别人用)。
+
 ## 功能
 
 - 本学期课程、作业、日历待办和教师/Tutor 公告
@@ -40,6 +47,9 @@ make test
 
 线上模式是多用户网站：邮箱魔法链接登录，每人自己绑定 Canvas Token 和可选的 AI Key。
 
+下面是概要。**完整的一步步手册见 [docs/deploy.md](docs/deploy.md)**，里面有服务商对比、
+备案说明、DNS 和发信域名验证、以及实测过的验证清单。
+
 生产环境必须同时满足：
 
 - HTTPS 域名
@@ -51,12 +61,23 @@ make test
 
 ### 1. 准备一台服务器
 
-推荐 1 核 2GB 以上的 Linux VPS，安装 Docker 和 Docker Compose。域名解析到这台机器，例如 `https://canvas.yourdomain.com`。
+Linux VPS，装好 Docker 和 Docker Compose，域名解析到这台机器。
+
+**内存至少 2 GB，并且要加 swap。** 构建镜像时要编译前端再装整个 Python 依赖集，
+峰值超过 1 GB，2 GB 机器不加 swap 会在这一步被 OOM 杀掉：
+
+```bash
+fallocate -l 2G /swapfile && chmod 600 /swapfile
+mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```
+
+跑起来之后三个容器合计约 300 MB，压力主要在构建那一下。
 
 ### 2. 克隆并配置
 
 ```bash
-git clone git@github.com:Jalensuggs/canvas-helper.git
+git clone https://github.com/Jalensuggs/canvas-helper.git
 cd canvas-helper
 cp .env.example .env
 ```
@@ -98,7 +119,18 @@ CANVAS_HELPER_TERM_START_MONTHS=3,9
 python3 -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
 ```
 
-SMTP 可以用学校邮箱、Resend、Amazon SES，或 Gmail 应用专用密码。没有能发出去的登录邮件，别人就登不进去。
+SMTP 可以用 Brevo、Resend、Amazon SES 这类发信服务，或 Gmail 应用专用密码。
+没有能发出去的登录邮件，别人就登不进去。
+
+**光有 SMTP 凭据不够，还要在发信服务里验证发件域名。** 用未验证的域名发信会被直接拒绝，
+而接口对用户永远返回 202（防邮箱枚举），页面上看不出任何异常。发信成没成只能看日志：
+
+```bash
+docker compose logs api | grep -i "delivery failed"
+```
+
+验证域名要在发信服务后台拿几条 DNS 记录加到域名商那里，步骤见
+[docs/deploy.md](docs/deploy.md)。
 
 ### 3. 启动应用
 
@@ -188,10 +220,16 @@ make check          # ruff + pytest + 前端类型检查/测试 + 前端构建 +
 
 ## 文档
 
+- [上线部署清单](docs/deploy.md)
 - [本地开发](docs/local-development.md)
 - [Docker 自托管](docs/docker-self-host.md)
 - [桌面打包](docs/desktop-release.md)
 - [备份与升级](docs/backup-upgrade.md)
 - [贡献](CONTRIBUTING.md)
 
-MIT License。
+## 许可
+
+[MIT License](LICENSE)，Copyright (c) 2026 Canvas Helper contributors。
+
+可以自由使用、修改、分发和商用，唯一要求是在副本中保留版权声明和许可声明。
+本项目按「现状」提供，不含任何担保。
