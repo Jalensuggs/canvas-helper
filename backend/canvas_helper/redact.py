@@ -4,17 +4,38 @@ from collections.abc import Mapping
 from typing import Any
 
 REDACTED = "[REDACTED]"
-_PATTERNS = (
-    re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]+"),
-    re.compile(
-        r"(?i)([?&](?:access_token|token|verifier|sf_verifier|api_key|key)=)"
-        r"[^&#\s]+"
+# A due date is a run of digits and dashes, which is also what a phone number
+# looks like. Redacting it would remove the one fact a deadline question turns
+# on, so a match that opens with a date is left alone.
+_DATE_START = re.compile(
+    r"^(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})"
+)
+
+
+def _number(match: re.Match[str]) -> str:
+    return match.group(0) if _DATE_START.match(match.group(0)) else REDACTED
+
+
+_PATTERNS: tuple[tuple[re.Pattern[str], Any], ...] = (
+    (re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]+"), r"\1" + REDACTED),
+    (
+        re.compile(
+            r"(?i)([?&](?:access_token|token|verifier|sf_verifier|api_key|key)=)"
+            r"[^&#\s]+"
+        ),
+        r"\1" + REDACTED,
     ),
-    re.compile(r"(?i)\b(sk-ant-[A-Za-z0-9_-]+)"),
-    re.compile(r"(?i)\b(sk-(?:proj-)?[A-Za-z0-9_-]{16,})"),
-    re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"),
-    re.compile(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b"),
-    re.compile(r"(?<!\d)(?:\+?\d[\d ()-]{7,}\d)(?!\d)"),
+    (re.compile(r"(?i)\b(sk-ant-[A-Za-z0-9_-]+)"), REDACTED),
+    (re.compile(r"(?i)\b(sk-(?:proj-)?[A-Za-z0-9_-]{16,})"), REDACTED),
+    (re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"), REDACTED),
+    (
+        re.compile(
+            r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}"
+            r"-[0-9a-f]{12}\b"
+        ),
+        REDACTED,
+    ),
+    (re.compile(r"(?<!\d)(?:\+?\d[\d ()-]{7,}\d)(?!\d)"), _number),
 )
 _SECRET_KEYS = {
     "authorization",
@@ -32,13 +53,8 @@ _SECRET_KEYS = {
 
 def redact_text(value: str) -> str:
     result = value
-    for pattern in _PATTERNS:
-        if pattern.pattern.startswith("(?i)\\b(Bearer"):
-            result = pattern.sub(r"\1" + REDACTED, result)
-        elif pattern.pattern.startswith("(?i)([?&]"):
-            result = pattern.sub(r"\1" + REDACTED, result)
-        else:
-            result = pattern.sub(REDACTED, result)
+    for pattern, replacement in _PATTERNS:
+        result = pattern.sub(replacement, result)
     return result
 
 

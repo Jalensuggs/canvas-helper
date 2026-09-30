@@ -25,6 +25,12 @@ from starlette.responses import FileResponse, HTMLResponse, PlainTextResponse, S
 
 from .actions import ActionError, ActionService
 from .ai import AI_PROVIDERS, AIService, AIUnavailable, sse_event
+from .study_state import (
+    assignment_completed,
+    current_course_ids,
+    planner_completed,
+    student_snapshot,
+)
 from .auth import AuthService
 from .canvas.client import CanvasClient
 from .canvas.pool import CanvasClientPool
@@ -179,65 +185,6 @@ def course_out(row: Course) -> dict[str, Any]:
     }
 
 
-def assignment_completed(row: Assignment) -> bool:
-    submission = row.raw.get("submission") or {}
-    return bool(
-        submission.get("excused")
-        or submission.get("submitted_at")
-        or submission.get("graded_at")
-        or submission.get("workflow_state")
-        in {"submitted", "graded", "pending_review", "complete"}
-    )
-
-
-def planner_completed(row: PlannerItem) -> bool:
-    override = row.raw.get("planner_override") or {}
-    submissions = row.raw.get("submissions") or {}
-    return bool(
-        row.completed
-        or override.get("marked_complete")
-        or submissions.get("submitted")
-        or submissions.get("graded")
-        or submissions.get("excused")
-    )
-
-
-async def current_course_ids(
-    session: AsyncSession, user_id: str, settings: Settings
-) -> set[int]:
-    """Infer the current teaching period when Canvas omits term dates."""
-    start = settings.current_term_start()
-    rows = (
-        await session.scalars(
-            select(Assignment).where(
-                Assignment.user_id == user_id, Assignment.due_at.is_not(None)
-            )
-        )
-    ).all()
-    if not rows:
-        return set(
-            (
-                await session.scalars(
-                    select(Course.id).where(Course.user_id == user_id)
-                )
-            ).all()
-        )
-    counts: dict[int, list[int]] = {}
-    for row in rows:
-        due_at = row.due_at
-        if due_at is None:
-            continue
-        if due_at.tzinfo is None:
-            due_at = due_at.replace(tzinfo=timezone.utc)
-        bucket = counts.setdefault(row.course_id, [0, 0])
-        bucket[0 if due_at >= start else 1] += 1
-    return {
-        course_id
-        for course_id, (current_count, old_count) in counts.items()
-        if current_count > 0 and current_count >= old_count
-    }
-
-
 def assignment_out(
     row: Assignment, *, course_canvas_id: int | None = None
 ) -> dict[str, Any]:
@@ -375,6 +322,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     canvas_transport: httpx.AsyncBaseTransport | None = None,
+    ai_client: Any | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     configure_logging()
@@ -1868,6 +1816,14 @@ def create_app(
             sources = await RetrievalService().retrieve(
                 session, user.id, prompt, scope=scope, scope_id=scope_id, top_k=8
             )
+            # Retrieval can only find what someone wrote down. Deadlines are
+            # rows with dates, so they are read and handed over directly.
+            snapshot = await student_snapshot(
+                session,
+                user.id,
+                settings,
+                course_id=scope_id if scope == "course" else None,
+            )
             provider = (
                 await request.app.state.credentials.get(
                     session, user.id, "ai_provider"
@@ -1889,6 +1845,7 @@ def create_app(
                 api_key,
                 model,
                 provider,
+                client=ai_client,
                 timeout=settings.ai_request_timeout_seconds,
             )
             wants_stream = body.stream or "text/event-stream" in request.headers.get(
@@ -1896,7 +1853,9 @@ def create_app(
             )
             if wants_stream:
                 async def events():
-                    async for event in service.stream(messages, sources=sources):
+                    async for event in service.stream(
+                        messages, sources=sources, context=snapshot
+                    ):
                         yield sse_event(event)
 
                 return StreamingResponse(
@@ -1904,7 +1863,7 @@ def create_app(
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
-            result = await service.chat(messages, sources=sources)
+            result = await service.chat(messages, sources=sources, context=snapshot)
             result["content"] = result.get("text", "")
             return Response(
                 content=json.dumps(result, ensure_ascii=False),

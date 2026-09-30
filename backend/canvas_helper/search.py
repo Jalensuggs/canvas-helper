@@ -45,10 +45,58 @@ def normalize_query(value: str) -> str:
     return _SPACE.sub(" ", unicodedata.normalize("NFKC", value)).strip()
 
 
-def _fts_query(value: str) -> str:
-    # Quoting every token prevents FTS operators in user input from becoming SQL/FTS
-    # syntax and works for both Latin words and Chinese phrases.
-    return " AND ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in _TOKENS.findall(value))
+# Words that carry no signal but, ANDed into a query, are enough to match
+# nothing at all: "what assignments do I have" required every one of them.
+_STOPWORDS = frozenset(
+    "a an and any are as at be been by can could do does did for from get give "
+    "has have how i in is it list me my of on or our show that the them then "
+    "there these this to was were what when where which who why will with you "
+    "your".split()
+)
+# Bigrams that are pure sentence scaffolding in Chinese. Dropping a bigram is
+# safe in a way that dropping a character is not: it never splits a real word.
+_CJK_STOP_BIGRAMS = frozenset(
+    "看看 我有 有哪 哪些 一下 可以 怎么 什么 是不 不是 的话 请帮 帮我 我想 "
+    "想要 告诉 诉我 需要 应该 我的 我们 你的 这个 那个 现在 还有 有没 没有 "
+    "多少 什麼 哪個".split()
+)
+
+
+def search_terms(value: str) -> list[str]:
+    """Split a query into the terms worth matching.
+
+    Latin text splits on spaces, so its words are already terms. A Chinese
+    sentence has no spaces: PostgreSQL tokenizes the whole thing as one word,
+    which is why the old code fell back to matching the entire sentence as a
+    single substring and found nothing. Overlapping 2-grams give it the word
+    boundaries it lacks.
+    """
+    terms: list[str] = []
+    for token in _TOKENS.findall(value):
+        if _has_cjk(token):
+            if len(token) <= 2:
+                terms.append(token)
+            else:
+                terms.extend(
+                    pair
+                    for index in range(len(token) - 1)
+                    if (pair := token[index : index + 2]) not in _CJK_STOP_BIGRAMS
+                )
+        elif token.casefold() not in _STOPWORDS:
+            # Terms are matched as substrings, so dropping a plural "s" lets
+            # "assignments" find an assignment without a stemmer.
+            terms.append(token[:-1] if len(token) > 3 and token[-1] in "sS" else token)
+    if not terms:
+        # A query that is nothing but stopwords still deserves its best effort.
+        terms = _TOKENS.findall(value)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for term in terms:
+        folded = term.casefold()
+        if folded not in seen:
+            seen.add(folded)
+            unique.append(term)
+    return unique[:12]
 
 
 def _safe_snippet(value: str, query: str, limit: int = 260) -> str:
@@ -102,7 +150,13 @@ def split_chunks(content: str, *, kind: str, target: int = 1200, overlap: int = 
 
 
 async def ensure_search_schema(engine: AsyncEngine) -> None:
-    """Create SQLite-only FTS objects omitted by SQLAlchemy metadata.create_all."""
+    """Create SQLite-only FTS objects omitted by SQLAlchemy metadata.create_all.
+
+    Search itself no longer reads this index: its tokenizer cannot see the
+    2-grams that Chinese queries are matched on, so both dialects now score
+    terms directly against the chunks. The index and its integrity check are
+    left in place; dropping them needs a migration of its own.
+    """
     if engine.dialect.name != "sqlite":
         return
     statements = [
@@ -246,50 +300,31 @@ class SearchService:
             "c.id, c.document_id, c.course_id, c.source_kind, c.source_id, "
             "c.title, c.content, c.ordinal, c.page, c.slide, c.source_date, c.source_url"
         )
-        if dialect == "postgresql":
-            if _has_cjk(normalized):
-                # to_tsvector('simple') splits on whitespace, so a Chinese
-                # sentence is one token and no substring of it ever matches.
-                # Trigram matching is what makes those queries work at all;
-                # migration 0008 adds the GIN index that keeps it fast.
-                params["pattern"] = f"%{normalized}%"
-                statement = text(
-                    f"SELECT {columns}, 0.0 AS rank FROM doc_chunks c WHERE "
-                    + " AND ".join(where)
-                    + " AND (c.title ILIKE :pattern OR c.content ILIKE :pattern) "
-                    "ORDER BY c.source_date DESC NULLS LAST, c.id LIMIT :limit"
-                )
-            else:
-                params["query"] = normalized
-                statement = text(
-                    f"SELECT {columns}, "
-                    "ts_rank_cd(c.search_vector, websearch_to_tsquery('simple', :query)) AS rank "
-                    "FROM doc_chunks c WHERE "
-                    + " AND ".join(where)
-                    + " AND c.search_vector @@ websearch_to_tsquery('simple', :query) "
-                    "ORDER BY rank DESC, c.id LIMIT :limit"
-                )
-        else:
-            fts = _fts_query(normalized)
-            # Trigram FTS requires three-character terms. LIKE is a safe fallback
-            # for very short queries, while all normal searches use the FTS index.
-            if not fts or any(len(token) < 3 for token in _TOKENS.findall(normalized)):
-                params["pattern"] = f"%{normalized}%"
-                statement = text(
-                    f"SELECT {columns}, 0.0 AS rank FROM doc_chunks c WHERE "
-                    + " AND ".join(where)
-                    + " AND (c.title LIKE :pattern OR c.content LIKE :pattern) "
-                    "ORDER BY c.source_date DESC, c.id LIMIT :limit"
-                )
-            else:
-                params["fts"] = fts
-                statement = text(
-                    f"SELECT {columns}, -bm25(search_index, 2.0, 1.0) AS rank "
-                    "FROM search_index JOIN doc_chunks c ON c.id = search_index.rowid "
-                    "WHERE search_index MATCH :fts AND "
-                    + " AND ".join(where)
-                    + " ORDER BY rank DESC, c.id LIMIT :limit"
-                )
+        terms = search_terms(normalized)
+        # Every term is optional and each one a row matches lifts it up the
+        # ranking. Requiring all of them, as this used to, meant one throwaway
+        # word in the question was enough to return nothing.
+        like = "ILIKE" if dialect == "postgresql" else "LIKE"
+        scores, matches = [], []
+        for index, term in enumerate(terms):
+            key = f"term_{index}"
+            params[key] = f"%{term}%"
+            scores.append(
+                f"(CASE WHEN c.title {like} :{key} THEN 2 ELSE 0 END) + "
+                f"(CASE WHEN c.content {like} :{key} THEN 1 ELSE 0 END)"
+            )
+            matches.append(f"c.title {like} :{key}")
+            matches.append(f"c.content {like} :{key}")
+        if not matches:
+            return []
+        nulls = " NULLS LAST" if dialect == "postgresql" else ""
+        statement = text(
+            f"SELECT {columns}, ({' + '.join(scores)}) AS rank "
+            "FROM doc_chunks c WHERE "
+            + " AND ".join(where)
+            + f" AND ({' OR '.join(matches)}) "
+            f"ORDER BY rank DESC, c.source_date DESC{nulls}, c.id LIMIT :limit"
+        )
         records = (await session.execute(statement, params)).mappings().all()
         rows = [
             {
